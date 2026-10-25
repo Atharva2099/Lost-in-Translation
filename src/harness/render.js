@@ -1,0 +1,198 @@
+const fs = require("node:fs");
+const { join } = require("node:path");
+const { spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
+const { PROJECT, noSymlinks, atomicWrite } = require("./workspace");
+const { installScene } = require("./scene-host");
+
+const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const engineSource = () => fs.readFileSync(join(PROJECT, "src/engine.js"), "utf8");
+
+function browserPath() {
+  const path = [process.env.CHROME_PATH, "/Applications/Helium.app/Contents/MacOS/Helium",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/chromium", "/usr/bin/google-chrome"]
+    .find((candidate) => candidate && fs.existsSync(candidate));
+  if (!path) throw new Error("Chromium not found; configure CHROME_PATH.");
+  return path;
+}
+
+async function withBrowser(operation, { signal, timeoutMs = 120000 } = {}) {
+  if (signal?.aborted) throw new Error("Render cancelled.");
+  const puppeteer = require("puppeteer-core");
+  // Fresh profile, Chromium's normal sandbox, no file-access relaxation or host bindings.
+  const browser = await puppeteer.launch({ executablePath: browserPath(), headless: true, timeout: 20000,
+    protocolTimeout: 20000, env: Object.fromEntries(["PATH", "HOME", "TMPDIR", "LANG"]
+      .filter((key) => process.env[key]).map((key) => [key, process.env[key]])),
+    args: ["--disable-background-networking", "--disable-sync", "--no-first-run"] });
+  let timer;
+  let abort;
+  const stopped = new Promise((_resolve, reject) => {
+    abort = () => { browser.process()?.kill("SIGKILL"); reject(new Error("Render cancelled or deadline reached.")); };
+    timer = setTimeout(abort, timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+  try { return await Promise.race([operation(browser), stopped]); }
+  finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+    let closeTimer;
+    try {
+      await Promise.race([browser.close().catch(() => {}), new Promise((done) => {
+        closeTimer = setTimeout(() => { browser.process()?.kill("SIGKILL"); done(); }, 1500);
+      })]);
+    } finally { clearTimeout(closeTimer); }
+  }
+}
+
+async function openScene(browser, source, { width, style }) {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(10000);
+  await page.setViewport({ width, height: Math.round(width * 16 / 9), deviceScaleFactor: 1 });
+  const errors = [];
+  let blockedRequests = 0;
+  page.on("pageerror", (error) => errors.push(error.message.slice(0, 300)));
+  await page.setRequestInterception(true);
+  page.on("request", (request) => { blockedRequests++; request.abort().catch(() => {}); });
+  await page.setContent('<body style="margin:0"><iframe sandbox="allow-scripts" style="border:0;width:100vw;height:100vh;display:block"></iframe></body>');
+  const frameElement = await page.$("iframe");
+  await frameElement.evaluate((el) => {
+    el.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; connect-src \'none\'; img-src data:; frame-src \'none\'; worker-src \'none\'; base-uri \'none\'; form-action \'none\'"><body style="margin:0;overflow:hidden"></body>';
+  });
+  await page.waitForFunction(() => document.querySelector("iframe").contentWindow !== null);
+  let frame;
+  for (let i = 0; i < 50; i++) {
+    frame = await frameElement.contentFrame();
+    if (frame && frame.url() === "about:srcdoc") break;
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  if (!frame || frame.url() !== "about:srcdoc") throw new Error("Isolated scene frame did not initialize.");
+  await frame.waitForFunction(() => document.body !== null);
+  await frame.evaluate((code) => new Function(code)(), engineSource());
+  const metadata = await frame.evaluate(installScene, source, width, style);
+  const draw = async (t) => {
+    const metrics = await frame.evaluate((time) => window.__sceneHost.renderAt(time), t);
+    if (errors.length) throw new Error(`Scene runtime error: ${errors[0]}`);
+    return metrics;
+  };
+  await draw(0); // Identical warmup for each independent page.
+  return { page, frame, draw, duration: metadata.duration, blocked: () => blockedRequests };
+}
+
+async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 } = {}) {
+  const brief = JSON.parse(workspace.read("brief.json"));
+  const source = workspace.read("scene.js");
+  const hashValue = workspace.sceneHash();
+  const dir = workspace.artifactDir();
+  const result = await withBrowser(async (browser) => {
+    const options = { width, style: brief.style };
+    const forward = await openScene(browser, source, options);
+    const reverse = await openScene(browser, source, options);
+    if (Math.abs(forward.duration - brief.duration) > 0.001) throw new Error("Scene duration differs from the brief.");
+    const times = [0.15, 0.45, 0.70, 0.95].map((phase) => Number((phase * forward.duration).toFixed(3)));
+    const images = new Map();
+    const samples = [];
+    for (let i = 0; i < times.length; i++) {
+      const metrics = await forward.draw(times[i]);
+      const bytes = await forward.page.screenshot({ type: "png" });
+      images.set(times[i], hash(bytes));
+      atomicWrite(noSymlinks(PROJECT, join(dir, `still-${i}.png`)), bytes);
+      samples.push({ t: times[i], ...metrics });
+    }
+    const mismatches = [];
+    for (const t of [...times].reverse()) {
+      await reverse.draw(t);
+      if (hash(await reverse.page.screenshot({ type: "png" })) !== images.get(t)) mismatches.push(t);
+    }
+    const blocked = forward.blocked() + reverse.blocked();
+    return { hash: hashValue, passed: !mismatches.length && !blocked && samples.every((s) => !s.warnings.length && !s.security_violations && !s.density_warnings.length),
+      density_policy: { status: "experimental_heuristic", max_prose_words: 30, max_long_prose_blocks: 2, equations_excluded: true },
+      duration: forward.duration, resolution: [width, Math.round(width * 16 / 9)], samples, mismatches, blocked_requests: blocked,
+      limitations: ["Four-phase sampling does not inspect every frame.", "Text probes do not prove diagram correctness or learner comprehension."] };
+  }, { signal, timeoutMs });
+  atomicWrite(noSymlinks(PROJECT, join(dir, "verification.json")), JSON.stringify(result, null, 2));
+  workspace.state.verification = result;
+  workspace.save();
+  return result;
+}
+
+function checkVideo(path, { width, fps, frameCount, signal }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-show_entries", "format=duration", "-of", "json", path],
+      { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH }, signal, timeout: 15000 });
+    let text = "";
+    child.stdout.on("data", (chunk) => { text += chunk; if (text.length > 64000) child.kill(); });
+    child.on("error", () => reject(new Error("FFprobe failed or was cancelled.")));
+    child.on("close", (code) => {
+      try {
+        const info = JSON.parse(text);
+        const stream = info.streams?.[0];
+        if (code !== 0 || !stream || stream.width !== width || stream.height !== Math.round(width * 16 / 9) ||
+            Number(stream.nb_read_frames) !== frameCount || !Number.isFinite(Number(info.format?.duration)) ||
+            Math.abs(Number(info.format?.duration) - frameCount / fps) > 0.01) {
+          throw new Error("Encoded video failed dimension, frame-count or duration validation.");
+        }
+        resolve();
+      } catch { reject(new Error("Encoded video failed dimension, frame-count or duration validation.")); }
+    });
+  });
+}
+
+function encode(dir, { width, fps, frameCount, signal }) {
+  const destination = join(dir, "preview.mp4");
+  const temporary = join(dir, "preview.tmp.mp4");
+  noSymlinks(PROJECT, temporary);
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffmpeg", ["-y", "-loglevel", "error", "-framerate", String(fps), "-i", join(dir, "frames/f%05d.jpg"),
+      "-frames:v", String(frameCount), "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", temporary],
+    { stdio: ["ignore", "ignore", "pipe"], env: { PATH: process.env.PATH }, signal, timeout: 45000 });
+    child.stderr.resume();
+    child.on("error", () => reject(new Error("FFmpeg failed or was cancelled.")));
+    child.on("close", async (code) => {
+      if (code !== 0) return reject(new Error("FFmpeg encoding failed."));
+      try {
+        await checkVideo(temporary, { width, fps, frameCount, signal });
+        fs.renameSync(temporary, noSymlinks(PROJECT, destination));
+        resolve({ width, fps, frameCount });
+      } catch (error) { reject(error); }
+    });
+  });
+}
+
+async function renderPreview(workspace, { signal, width = 540, fps = 24, timeoutMs = 180000 } = {}) {
+  if (![360, 540, 1080].includes(width) || ![10, 24, 30].includes(fps)) throw new Error("Unsupported preview settings.");
+  const hashValue = workspace.sceneHash();
+  if (workspace.state.verification?.hash !== hashValue || !workspace.state.verification.passed) throw new Error("Verify the current scene before rendering.");
+  const brief = JSON.parse(workspace.read("brief.json"));
+  const dir = workspace.artifactDir();
+  const frames = noSymlinks(PROJECT, join(dir, "frames"));
+  fs.mkdirSync(frames, { recursive: true, mode: 0o700 });
+  const identity = { hash: hashValue, width, fps, duration: brief.duration };
+  const manifest = noSymlinks(PROJECT, join(dir, "render-settings.json"));
+  if (fs.existsSync(manifest) && fs.readFileSync(manifest, "utf8") !== JSON.stringify(identity)) throw new Error("Use a new scene revision for different render settings.");
+  atomicWrite(manifest, JSON.stringify(identity));
+  const frameCount = Math.round(brief.duration * fps);
+  let captured = 0;
+  await withBrowser(async (browser) => {
+    const scene = await openScene(browser, workspace.read("scene.js"), { width, style: brief.style });
+    for (let index = 0; index < frameCount; index++) {
+      if (signal?.aborted) throw new Error("Render cancelled.");
+      const file = noSymlinks(PROJECT, join(frames, `f${String(index).padStart(5, "0")}.jpg`));
+      if (fs.existsSync(file) && fs.statSync(file).size > 100) {
+        const bytes = fs.readFileSync(file);
+        if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9) continue;
+      }
+      const metrics = await scene.draw(index / fps);
+      if (metrics.security_violations || scene.blocked()) throw new Error("Scene attempted a forbidden browser operation.");
+      if (metrics.warnings.length) throw new Error("Text geometry failed during full temporal rendering.");
+      atomicWrite(file, await scene.page.screenshot({ type: "jpeg", quality: 92 }));
+      captured++;
+    }
+  }, { signal, timeoutMs });
+  await encode(dir, { width, fps, frameCount, signal });
+  workspace.state.preview = { ...identity, file: "preview.mp4", frame_count: frameCount, captured_frames: captured, audio: false };
+  workspace.save();
+  return workspace.state.preview;
+}
+
+module.exports = { verifyScene, renderPreview, openScene, withBrowser };

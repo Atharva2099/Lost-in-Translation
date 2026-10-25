@@ -15,6 +15,10 @@
 !/tools/*.js
 !/tools/*.py
 
+!/tests/
+!/tests/*.test.js
+!/tests/*.integration.js
+
 /experiments/
 
 # Never publish credentials, even if an allowlisted directory contains them.
