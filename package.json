@@ -13,7 +13,9 @@
     "scene:generate": "node tools/lit.js generate",
     "scene:resume": "node tools/lit.js resume",
     "scene:status": "node tools/lit.js status",
-    "test:render": "node --test tests/render.integration.js"
+    "test:render": "node --test tests/render.integration.js",
+    "project:demo": "node tools/lit.js project-demo",
+    "test:project": "node --test tests/project.test.js"
   },
   "keywords": [],
   "author": "",

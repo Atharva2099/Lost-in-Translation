@@ -2,7 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { join } = require("node:path");
 const { randomUUID } = require("node:crypto");
-const { writeFileSync } = require("node:fs");
+const { writeFileSync, readFileSync } = require("node:fs");
 const { Workspace, PROJECT } = require("../src/harness/workspace");
 const { verifyScene, renderPreview } = require("../src/harness/render");
 const { brief, source } = require("../src/harness/demo");
@@ -67,7 +67,12 @@ test("generated browser code cannot read its parent or use a network connection"
 
 test("browser initialization and draw errors fail instead of becoming valid previews", { timeout: 40000 }, async () => {
   const ws = setup('return {duration:12,draw(){throw Error("deliberate draw failure")}};');
-  await assert.rejects(verifyScene(ws, { width: 360 }), /deliberate draw failure/);
+  const result = await verifyScene(ws, { width: 360 });
+  assert.equal(result.passed, false);
+  assert.match(result.source_defect.evidence, /deliberate draw failure/);
+  assert.deepEqual(ws.state.verification, result);
+  assert.deepEqual(JSON.parse(readFileSync(join(ws.artifactDir(), "verification.json"), "utf8")), result);
+  assert.equal(ws.gate({ requireReview: false }).passed, false);
   assert.equal(ws.state.preview, null);
 });
 

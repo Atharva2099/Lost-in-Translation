@@ -4,7 +4,8 @@ const { randomUUID, createHash } = require("node:crypto");
 
 const PROJECT = resolve(__dirname, "../..");
 const RUNS = join(PROJECT, "build/runs");
-const FILES = new Set(["scene.js", "plan.json", "brief.json", "state.json", "history.json", "events.jsonl"]);
+const FILES = new Set(["scene.js", "plan.json", "brief.json", "project.json", "state.json", "history.json", "events.jsonl",
+  "topic.json", "research.json", "search-response.json", "bootstrap-response.json", "search-rejected-1.json", "bootstrap-rejected-1.json"]);
 
 function noSymlinks(base, target) {
   const rel = relative(base, target);

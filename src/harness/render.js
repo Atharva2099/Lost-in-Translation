@@ -4,9 +4,14 @@ const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { PROJECT, noSymlinks, atomicWrite } = require("./workspace");
 const { installScene } = require("./scene-host");
+const { sceneGeometry, validateTypography } = require("./project");
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const engineSource = () => fs.readFileSync(join(PROJECT, "src/engine.js"), "utf8");
+function isGeneratedSceneDefect(error, signal) {
+  if (signal?.aborted) return false;
+  return error?.name === "SyntaxError" || /Scene runtime error:|scene duration differs|Scene duration must match|Scene must return|draw must be synchronous|Invalid stroke geometry|Math\.random|forbidden browser operation|Text geometry failed during full temporal rendering|JavaScript execution timed out|Execution context was destroyed/u.test(error?.message || "");
+}
 
 function browserPath() {
   const path = [process.env.CHROME_PATH, "/Applications/Helium.app/Contents/MacOS/Helium",
@@ -45,10 +50,31 @@ async function withBrowser(operation, { signal, timeoutMs = 120000, software = f
   }
 }
 
-async function openScene(browser, source, { width, style }) {
+function renderSettings(brief, width) {
+  const project = brief.frame || {};
+  const aspectWidth = project.width || 1080;
+  const aspectHeight = project.height || 1920;
+  const logicalWidth = brief.logical_width === undefined ? (project.logicalWidth === undefined ? 1080 : project.logicalWidth) : brief.logical_width;
+  const logicalHeight = brief.logical_height === undefined ? (project.logicalHeight === undefined ? logicalWidth * aspectHeight / aspectWidth : project.logicalHeight) : brief.logical_height;
+  const outputHeight = Math.round(width * aspectHeight / aspectWidth);
+  if (outputHeight % 2 !== 0) throw new Error("Output height must be even for yuv420p video encoding.");
+  const geometry = sceneGeometry({ frame: { width: aspectWidth, height: aspectHeight } }, {
+    id: "render", logical_width: logicalWidth, logical_height: logicalHeight,
+    safe_region: brief.safe_region || (brief.frame ? undefined : { left: 54, top: 150, right: 1026, bottom: 1670 })
+  });
+  const typography = brief.typography || null;
+  if (typography && !validateTypography(typography)) throw new Error("Invalid project typography settings.");
+  return { width, height: outputHeight, style: brief.style, configuration: {
+    logicalWidth, logicalHeight, outputHeight, duration: brief.duration,
+    safeRegion: geometry.safe_region, typography, density: brief.density_policy || { maxWords: 30, maxLongBlocks: 2 }, palette: brief.palette || {}
+  } };
+}
+
+async function openScene(browser, source, { width, style, configuration = {} }) {
   const page = await browser.newPage();
   page.setDefaultTimeout(10000);
-  await page.setViewport({ width, height: Math.round(width * 16 / 9), deviceScaleFactor: 1 });
+  const height = configuration.outputHeight || Math.round(width * 16 / 9);
+  await page.setViewport({ width, height, deviceScaleFactor: 1 });
   const errors = [];
   let blockedRequests = 0;
   page.on("pageerror", (error) => errors.push(error.message.slice(0, 300)));
@@ -75,9 +101,11 @@ async function openScene(browser, source, { width, style }) {
       window.Riso = new Function(code + "\nreturn Riso;")();
     }, require("./skills").readRisoKit());
   }
-  const metadata = await frame.evaluate(installScene, source, width, style);
+  const metadata = await frame.evaluate(installScene, source, width, style, configuration);
   const draw = async (t) => {
-    const metrics = await frame.evaluate((time) => window.__sceneHost.renderAt(time), t);
+    let metrics;
+    try { metrics = await frame.evaluate((time) => window.__sceneHost.renderAt(time), t); }
+    catch (error) { throw new Error(`Scene runtime error: ${error.message || "draw failed"}`); }
     if (errors.length) throw new Error(`Scene runtime error: ${errors[0]}`);
     return metrics;
   };
@@ -90,8 +118,9 @@ async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 }
   const source = workspace.read("scene.js");
   const hashValue = workspace.sceneHash();
   const dir = workspace.artifactDir();
-  const result = await withBrowser(async (browser) => {
-    const options = { width, style: brief.style };
+  let result;
+  try { result = await withBrowser(async (browser) => {
+    const options = renderSettings(brief, width);
     const forward = await openScene(browser, source, options);
     // Riso performs canvas pixel readback: compare seek order in the same rendering
     // context rather than treating cross-origin raster/readback variation as scene drift.
@@ -118,18 +147,25 @@ async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 }
     }
     const blocked = forward.blocked() + reverse.blocked();
     return { hash: hashValue, passed: !mismatches.length && !blocked && samples.every((s) => !s.warnings.length && !s.security_violations && !s.density_warnings.length),
-      density_policy: { status: "experimental_heuristic", max_prose_words: 30, max_long_prose_blocks: 2, equations_excluded: true },
+      density_policy: { status: "experimental_heuristic", max_prose_words: options.configuration.density.maxWords, max_long_prose_blocks: options.configuration.density.maxLongBlocks, equations_excluded: true },
       determinism_mode: brief.style === "risograph" ? "same-context-reverse" : "cold-context-reverse",
-      duration: forward.duration, resolution: [width, Math.round(width * 16 / 9)], samples, mismatches, blocked_requests: blocked,
+      duration: forward.duration, resolution: [width, options.height], samples, mismatches, blocked_requests: blocked,
       limitations: ["Four-phase sampling does not inspect every frame.", "Text probes do not prove diagram correctness or learner comprehension."] };
-  }, { signal, timeoutMs, software: brief.style === "risograph" });
+  }, { signal, timeoutMs, software: brief.style === "risograph" }); }
+  catch (error) {
+    if (!isGeneratedSceneDefect(error, signal)) throw error;
+    result = { hash: hashValue, passed: false, source_defect: { type: error.name || "scene_error", evidence: (error.message || "Scene failed to initialize or draw.").slice(0, 1000) },
+      duration: brief.duration, resolution: [width, renderSettings(brief, width).height], samples: [], mismatches: [], blocked_requests: 0,
+      density_policy: { status: "not_measured", reason: "Scene code failed before a complete sample set." },
+      limitations: ["Scene source failed to initialize or draw; edit the scene and rerun verification."] };
+  }
   atomicWrite(noSymlinks(PROJECT, join(dir, "verification.json")), JSON.stringify(result, null, 2));
   workspace.state.verification = result;
   workspace.save();
   return result;
 }
 
-function checkVideo(path, { width, fps, frameCount, signal }) {
+function checkVideo(path, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal }) {
   return new Promise((resolve, reject) => {
     const child = spawn("ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-show_entries", "format=duration", "-of", "json", path],
       { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH }, signal, timeout: 15000 });
@@ -140,7 +176,7 @@ function checkVideo(path, { width, fps, frameCount, signal }) {
       try {
         const info = JSON.parse(text);
         const stream = info.streams?.[0];
-        if (code !== 0 || !stream || stream.width !== width || stream.height !== Math.round(width * 16 / 9) ||
+        if (code !== 0 || !stream || stream.width !== width || stream.height !== height ||
             Number(stream.nb_read_frames) !== frameCount || !Number.isFinite(Number(info.format?.duration)) ||
             Math.abs(Number(info.format?.duration) - frameCount / fps) > 0.01) {
           throw new Error("Encoded video failed dimension, frame-count or duration validation.");
@@ -151,7 +187,7 @@ function checkVideo(path, { width, fps, frameCount, signal }) {
   });
 }
 
-function encode(dir, { width, fps, frameCount, signal }) {
+function encode(dir, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal }) {
   const destination = join(dir, "preview.mp4");
   const temporary = join(dir, "preview.tmp.mp4");
   noSymlinks(PROJECT, temporary);
@@ -164,7 +200,7 @@ function encode(dir, { width, fps, frameCount, signal }) {
     child.on("close", async (code) => {
       if (code !== 0) return reject(new Error("FFmpeg encoding failed."));
       try {
-        await checkVideo(temporary, { width, fps, frameCount, signal });
+        await checkVideo(temporary, { width, height, fps, frameCount, signal });
         fs.renameSync(temporary, noSymlinks(PROJECT, destination));
         resolve({ width, fps, frameCount });
       } catch (error) { reject(error); }
@@ -173,21 +209,22 @@ function encode(dir, { width, fps, frameCount, signal }) {
 }
 
 async function renderPreview(workspace, { signal, width = 540, fps = 24, timeoutMs = 180000 } = {}) {
-  if (![360, 540, 1080].includes(width) || ![10, 24, 30].includes(fps)) throw new Error("Unsupported preview settings.");
+  if (![360, 540, 640, 720, 960, 1080, 1280, 1920].includes(width) || ![10, 12, 24, 30].includes(fps)) throw new Error("Unsupported preview settings.");
   const hashValue = workspace.sceneHash();
   if (workspace.state.verification?.hash !== hashValue || !workspace.state.verification.passed) throw new Error("Verify the current scene before rendering.");
   const brief = JSON.parse(workspace.read("brief.json"));
   const dir = workspace.artifactDir();
   const frames = noSymlinks(PROJECT, join(dir, "frames"));
   fs.mkdirSync(frames, { recursive: true, mode: 0o700 });
-  const identity = { hash: hashValue, width, fps, duration: brief.duration };
+  const settings = renderSettings(brief, width);
+  const identity = { hash: hashValue, width, height: settings.height, fps, duration: brief.duration };
   const manifest = noSymlinks(PROJECT, join(dir, "render-settings.json"));
   if (fs.existsSync(manifest) && fs.readFileSync(manifest, "utf8") !== JSON.stringify(identity)) throw new Error("Use a new scene revision for different render settings.");
   atomicWrite(manifest, JSON.stringify(identity));
   const frameCount = Math.round(brief.duration * fps);
   let captured = 0;
   await withBrowser(async (browser) => {
-    const scene = await openScene(browser, workspace.read("scene.js"), { width, style: brief.style });
+    const scene = await openScene(browser, workspace.read("scene.js"), settings);
     for (let index = 0; index < frameCount; index++) {
       if (signal?.aborted) throw new Error("Render cancelled.");
       const file = noSymlinks(PROJECT, join(frames, `f${String(index).padStart(5, "0")}.jpg`));
@@ -202,10 +239,10 @@ async function renderPreview(workspace, { signal, width = 540, fps = 24, timeout
       captured++;
     }
   }, { signal, timeoutMs, software: brief.style === "risograph" });
-  await encode(dir, { width, fps, frameCount, signal });
+  await encode(dir, { width, height: settings.height, fps, frameCount, signal });
   workspace.state.preview = { ...identity, file: "preview.mp4", frame_count: frameCount, captured_frames: captured, audio: false };
   workspace.save();
   return workspace.state.preview;
 }
 
-module.exports = { verifyScene, renderPreview, openScene, withBrowser };
+module.exports = { verifyScene, renderPreview, openScene, withBrowser, renderSettings, isGeneratedSceneDefect };
