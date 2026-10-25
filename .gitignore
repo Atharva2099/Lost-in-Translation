@@ -15,16 +15,7 @@
 !/tools/*.js
 !/tools/*.py
 
-!/experiments/
-!/experiments/exp002_convolution/
-!/experiments/exp002_convolution/studio.html
-!/experiments/exp002_convolution/src/
-!/experiments/exp002_convolution/src/**/
-!/experiments/exp002_convolution/src/**/*.js
-!/experiments/exp002_convolution/src/**/*.json
-!/experiments/exp002_convolution/tools/
-!/experiments/exp002_convolution/tools/*.js
-!/experiments/exp002_convolution/tools/*.py
+/experiments/
 
 # Never publish credentials, even if an allowlisted directory contains them.
 .env
