@@ -11,7 +11,7 @@ const demo = require("../src/harness/demo");
 const risoDemo = require("../src/harness/riso-demo");
 const { ProjectWorkspace, validateProject, assembleProject } = require("../src/harness/project");
 const { runProjectDemo } = require("../src/harness/project-demo");
-const { runProjectAgent, makeProjectTools, approveReviewRetry } = require("../src/harness/project-agent");
+const { runProjectAgent, makeProjectTools, approveReviewRetry, dispatchParallelSwarm } = require("../src/harness/project-agent");
 const { openTopic, createProject } = require("../src/harness/create");
 
 function shellQuote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
@@ -84,7 +84,13 @@ async function main() {
           if (event.type === "request_completed") console.log(`Request ${event.call} completed.`);
           workspace.event(event);
         } });
-      const result = await createProject(workspace, session, { signal: controller.signal, retryPlanning: values["retry-planning"], approveReviewRetry: values["approve-review-retry"], log: console.log });
+      const result = await createProject(workspace, session, {
+      signal: controller.signal,
+      retryPlanning: values["retry-planning"],
+      approveReviewRetry: values["approve-review-retry"],
+      log: console.log,
+      produce: (proj, sess, opts) => dispatchParallelSwarm(proj, sess, { concurrency: 3, ...opts })
+    });
       console.log(`Status: ${result.status || (result.passed ? "ready_for_human_review" : "paused")}`);
       if (result.assembly?.file) console.log(`Output: ${result.assembly.file}`);
     } finally { clearTimeout(deadline); release(); process.removeListener("SIGINT", cancel); }
