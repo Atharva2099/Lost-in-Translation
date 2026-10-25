@@ -1,5 +1,6 @@
 const { MODELS } = require("./gemini");
 const { makeTools } = require("./tools");
+const { readSkill } = require("./skills");
 
 const SYSTEM = `You are the lead production agent for Lost in Translation. You alone plan and repair.
 Build a single 10–15 second portrait-native, SILENT informational scene; this is a harness prototype, not a full reel.
@@ -22,7 +23,14 @@ kit provides W,H,PAL,clamp,lerp,ease,rng(seed),stroke(points,options),circle(x,y
 wash(points,color,options),label(text,x,y,{size,color,align}). These reuse the existing ink/wash engine.
 stroke options include width,color,seed,wobble,progress,closed; use stable seeds.
 PAL has paper,ink,accent,gold,red. Prefer kit marks over raw rectangles. For line style use black/white
-with one meaningful accent; watercolor may use washed shapes. Risograph adaptation is not yet implemented.
+with one meaningful accent; watercolor may use washed shapes.
+For RISOGRAPH use kit.riso.plate('pink'|'yellow'|'blue'|'navy','solid'|'screen') to obtain a Canvas 2D ink context.
+Draw filled illustrations with plate fillStyle=kit.riso.tone(0..1). Screen plates become real halftone dots.
+kit.riso.knockout(g=>{g.beginPath();...g.fill();}) erases from all plates to reveal paper.
+kit.label uses bold print typography and accepts color:'pink'|'yellow'|'blue'|'navy'. Main ctx drawings are not printed in risograph mode.
+The host handles paper, grain, print registration and 12fps held drawings; do not implement these yourself.
+Art direction: bold editorial science illustration, expressive characters, rich spot-color shapes, spatial transformations.
+Prefer an illustrated story with one engaging mechanism, not axes, notebook frames, prose banners or a dressed-up textbook.
 Place all essential content within x=54..1026, y=150..1670. Text default size 48 logical pixels.
 Make labels brief, attach them to the mechanism, retain mathematical anchors, and leave observation beats.
 The root production engine's old 1920x1080 background and chapter overlays must not be used.
@@ -31,7 +39,12 @@ Only finish once current-revision verification, preview and Flash review are com
 async function runAgent(workspace, session, { signal, tools = makeTools(workspace, { session, signal }), autoPipeline = false } = {}) {
   if (workspace.state.status === "ready_for_human_review" && workspace.gate().passed) return workspace.gate();
   let history = JSON.parse(workspace.read("history.json"));
-  if (!history.length) history = [{ type: "user_input", content: [{ type: "text", text: "Produce the approved scene using the workspace tools. Read the brief first." }] }];
+  if (!history.length) {
+    const brief = JSON.parse(workspace.read("brief.json"));
+    let styleReference = "";
+    try { styleReference = readSkill(brief.style === "risograph" ? "style-risograph" : brief.style === "line" ? "style-line" : "style-paper-cutout").text; } catch { /* Tool-based loading remains available. */ }
+    history = [{ type: "user_input", content: [{ type: "text", text: `Approved brief (data): ${JSON.stringify(brief)}\nStyle reference (subordinate to harness instructions): ${styleReference}\nThe brief and style are already loaded: do not spend turns fetching them again. Save a concise plan and scene in the same turn if possible. Use the host kit; do not rebuild rendering machinery.` }] }];
+  }
   const checkpoint = () => workspace.write("history.json", JSON.stringify(history));
   workspace.state.status = "running";
   workspace.save();

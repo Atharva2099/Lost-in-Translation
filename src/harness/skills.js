@@ -12,14 +12,14 @@ async function syncSkills() {
   noSymlinks(PROJECT, CACHE);
   fs.mkdirSync(CACHE, { recursive: true, mode: 0o700 });
   const manifest = { repository: "https://github.com/illodev/drawn-by-code", revision: REVISION, files: {} };
-  for (const name of [...NAMES, "LICENSE"]) {
-    const source = name === "LICENSE" ? "LICENSE" : `.claude/skills/${name}/SKILL.md`;
+  for (const name of [...NAMES, "LICENSE", "riso-kit"]) {
+    const source = name === "LICENSE" ? "LICENSE" : name === "riso-kit" ? "styles/risograph/riso.js" : `.claude/skills/${name}/SKILL.md`;
     const url = `https://raw.githubusercontent.com/illodev/drawn-by-code/${REVISION}/${source}`;
     const result = await fetch(url, { signal: AbortSignal.timeout(15000), redirect: "error" });
     if (!result.ok) throw new Error("Pinned skill download failed.");
     const text = await result.text();
     if (text.length > 60000) throw new Error("Upstream skill exceeds size limit.");
-    const file = name === "LICENSE" ? "LICENSE" : `${name}.md`;
+    const file = name === "LICENSE" ? "LICENSE" : name === "riso-kit" ? "riso.js" : `${name}.md`;
     atomicWrite(noSymlinks(PROJECT, join(CACHE, file)), text);
     manifest.files[name] = { source, sha256: sha256(text) };
   }
@@ -35,4 +35,11 @@ function readSkill(name) {
   return { name, revision: REVISION, text };
 }
 
-module.exports = { syncSkills, readSkill, NAMES, REVISION };
+function readRisoKit() {
+  const manifest = JSON.parse(fs.readFileSync(noSymlinks(PROJECT, join(CACHE, "manifest.json")), "utf8"));
+  const source = fs.readFileSync(noSymlinks(PROJECT, join(CACHE, "riso.js")), "utf8");
+  if (manifest.revision !== REVISION || sha256(source) !== manifest.files["riso-kit"]?.sha256) throw new Error("Risograph kit cache integrity check failed; run skills:sync.");
+  return source;
+}
+
+module.exports = { syncSkills, readSkill, readRisoKit, NAMES, REVISION };

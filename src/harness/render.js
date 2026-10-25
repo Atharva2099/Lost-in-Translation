@@ -16,14 +16,14 @@ function browserPath() {
   return path;
 }
 
-async function withBrowser(operation, { signal, timeoutMs = 120000 } = {}) {
+async function withBrowser(operation, { signal, timeoutMs = 120000, software = false } = {}) {
   if (signal?.aborted) throw new Error("Render cancelled.");
   const puppeteer = require("puppeteer-core");
   // Fresh profile, Chromium's normal sandbox, no file-access relaxation or host bindings.
   const browser = await puppeteer.launch({ executablePath: browserPath(), headless: true, timeout: 20000,
     protocolTimeout: 20000, env: Object.fromEntries(["PATH", "HOME", "TMPDIR", "LANG"]
       .filter((key) => process.env[key]).map((key) => [key, process.env[key]])),
-    args: ["--disable-background-networking", "--disable-sync", "--no-first-run"] });
+    args: ["--disable-background-networking", "--disable-sync", "--no-first-run", ...(software ? ["--disable-gpu"] : [])] });
   let timer;
   let abort;
   const stopped = new Promise((_resolve, reject) => {
@@ -69,6 +69,12 @@ async function openScene(browser, source, { width, style }) {
   if (!frame || frame.url() !== "about:srcdoc") throw new Error("Isolated scene frame did not initialize.");
   await frame.waitForFunction(() => document.body !== null);
   await frame.evaluate((code) => new Function(code)(), engineSource());
+  if (style === "risograph") {
+    await frame.evaluate((code) => {
+      window.Motion = { rng: window.ENG.rngFor };
+      window.Riso = new Function(code + "\nreturn Riso;")();
+    }, require("./skills").readRisoKit());
+  }
   const metadata = await frame.evaluate(installScene, source, width, style);
   const draw = async (t) => {
     const metrics = await frame.evaluate((time) => window.__sceneHost.renderAt(time), t);
@@ -87,7 +93,9 @@ async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 }
   const result = await withBrowser(async (browser) => {
     const options = { width, style: brief.style };
     const forward = await openScene(browser, source, options);
-    const reverse = await openScene(browser, source, options);
+    // Riso performs canvas pixel readback: compare seek order in the same rendering
+    // context rather than treating cross-origin raster/readback variation as scene drift.
+    const reverse = brief.style === "risograph" ? forward : await openScene(browser, source, options);
     if (Math.abs(forward.duration - brief.duration) > 0.001) throw new Error("Scene duration differs from the brief.");
     const times = [0.15, 0.45, 0.70, 0.95].map((phase) => Number((phase * forward.duration).toFixed(3)));
     const images = new Map();
@@ -102,14 +110,19 @@ async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 }
     const mismatches = [];
     for (const t of [...times].reverse()) {
       await reverse.draw(t);
-      if (hash(await reverse.page.screenshot({ type: "png" })) !== images.get(t)) mismatches.push(t);
+      const reverseBytes = await reverse.page.screenshot({ type: "png" });
+      if (hash(reverseBytes) !== images.get(t)) {
+        mismatches.push(t);
+        atomicWrite(noSymlinks(PROJECT, join(dir, `reverse-${times.indexOf(t)}.png`)), reverseBytes);
+      }
     }
     const blocked = forward.blocked() + reverse.blocked();
     return { hash: hashValue, passed: !mismatches.length && !blocked && samples.every((s) => !s.warnings.length && !s.security_violations && !s.density_warnings.length),
       density_policy: { status: "experimental_heuristic", max_prose_words: 30, max_long_prose_blocks: 2, equations_excluded: true },
+      determinism_mode: brief.style === "risograph" ? "same-context-reverse" : "cold-context-reverse",
       duration: forward.duration, resolution: [width, Math.round(width * 16 / 9)], samples, mismatches, blocked_requests: blocked,
       limitations: ["Four-phase sampling does not inspect every frame.", "Text probes do not prove diagram correctness or learner comprehension."] };
-  }, { signal, timeoutMs });
+  }, { signal, timeoutMs, software: brief.style === "risograph" });
   atomicWrite(noSymlinks(PROJECT, join(dir, "verification.json")), JSON.stringify(result, null, 2));
   workspace.state.verification = result;
   workspace.save();
@@ -188,7 +201,7 @@ async function renderPreview(workspace, { signal, width = 540, fps = 24, timeout
       atomicWrite(file, await scene.page.screenshot({ type: "jpeg", quality: 92 }));
       captured++;
     }
-  }, { signal, timeoutMs });
+  }, { signal, timeoutMs, software: brief.style === "risograph" });
   await encode(dir, { width, fps, frameCount, signal });
   workspace.state.preview = { ...identity, file: "preview.mp4", frame_count: frameCount, captured_frames: captured, audio: false };
   workspace.save();

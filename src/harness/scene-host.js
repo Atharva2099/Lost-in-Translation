@@ -8,24 +8,34 @@ function installScene(source, width, style) {
   document.body.append(canvas);
   const ctx = canvas.getContext("2d", { alpha: false });
   const engine = window.ENG;
+  const press = style === "risograph" ? window.Riso.press({ px: [width, canvas.height], k: width / W }) : null;
+  const tracked = new WeakSet();
   const PAL = Object.freeze({ paper: "#FAF5E8", ink: "#241E28", accent: "#2A857E", gold: "#E8A838", red: "#C83E37" });
   let texts = [], securityViolations = 0;
   document.addEventListener("securitypolicyviolation", () => securityViolations++);
-  const nativeFillText = ctx.fillText.bind(ctx);
-  ctx.fillText = function (text, x, y, maxWidth) {
-    const m = ctx.measureText(String(text));
+  function trackText(context) {
+    if (tracked.has(context)) return context;
+    tracked.add(context);
+    const nativeFillText = context.fillText.bind(context);
+    context.fillText = function (text, x, y, maxWidth) {
+    const m = context.measureText(String(text));
     const k = W / canvas.width;
-    const matrix = ctx.getTransform();
+    const matrix = context.getTransform();
     const corners = [[x - m.actualBoundingBoxLeft, y - m.actualBoundingBoxAscent],
       [x + m.actualBoundingBoxRight, y - m.actualBoundingBoxAscent],
       [x - m.actualBoundingBoxLeft, y + m.actualBoundingBoxDescent],
       [x + m.actualBoundingBoxRight, y + m.actualBoundingBoxDescent]]
       .map(([px, py]) => [k * (matrix.a * px + matrix.c * py + matrix.e), k * (matrix.b * px + matrix.d * py + matrix.f)]);
-    if (ctx.globalAlpha > 0.05) texts.push({ text: String(text),
+    if (context.globalAlpha > 0.05) texts.push({ text: String(text),
       box: [Math.min(...corners.map((p) => p[0])), Math.min(...corners.map((p) => p[1])),
         Math.max(...corners.map((p) => p[0])), Math.max(...corners.map((p) => p[1]))] });
     return maxWidth === undefined ? nativeFillText(text, x, y) : nativeFillText(text, x, y, maxWidth);
   };
+    return context;
+  }
+  trackText(ctx);
+  const ink = (color) => color === PAL.accent || color === "blue" ? "blue" : color === PAL.gold || color === "yellow" ? "yellow" : color === PAL.red || color === "pink" ? "pink" : "navy";
+  const plate = (name = "navy", kind = "solid") => trackText(press.plate(name, kind));
   function prepared(points, closed) {
     if (!Array.isArray(points) || points.length < 2 || points.length > 2000 || points.some((p) => !Array.isArray(p) || p.length !== 2 || !p.every(Number.isFinite))) throw new Error("Invalid stroke geometry.");
     const clean = points.filter((p, i) => !i || Math.hypot(p[0] - points[i - 1][0], p[1] - points[i - 1][1]) > 0.001);
@@ -37,19 +47,21 @@ function installScene(source, width, style) {
   }
   const kit = Object.freeze({
     W, H, PAL, clamp: engine.clamp, lerp: engine.lerp, ease: engine.easeInOutCubic, rng: engine.rngFor,
-    stroke(points, options = {}) { engine.penStroke(ctx, prepared(points, options.closed), { width: 5, color: PAL.ink, seed: "stroke", ...options }); },
+    riso: press ? Object.freeze({ plate, tone: window.Riso.tone, knockout: (fn) => press.knockout(fn), ramp: window.Riso.ramp, radial: window.Riso.radial }) : null,
+    stroke(points, options = {}) { engine.penStroke(press ? plate(ink(options.color)) : ctx, prepared(points, options.closed), { width: 5, color: PAL.ink, seed: "stroke", ...options, ...(press ? { color: "#000" } : {}) }); },
     circle(x, y, r, options = {}) {
       const points = Array.from({ length: 49 }, (_, i) => [x + r * Math.cos(i * Math.PI / 24), y + r * Math.sin(i * Math.PI / 24)]);
-      engine.penStroke(ctx, points, { closed: true, width: 5, color: PAL.ink, seed: "circle", ...options });
+      engine.penStroke(press ? plate(ink(options.color)) : ctx, points, { closed: true, width: 5, color: PAL.ink, seed: "circle", ...options, ...(press ? { color: "#000" } : {}) });
     },
-    wash(points, color, options = {}) { engine.wetWash(ctx, prepared(points, true), color, { alpha: 0.3, bleed: 2, dx: 0, dy: 0, seed: "wash", ...options }); },
+    wash(points, color, options = {}) { engine.wetWash(press ? plate(ink(color), "screen") : ctx, prepared(points, true), press ? "#000000" : color, { alpha: 0.3, bleed: 2, dx: 0, dy: 0, seed: "wash", ...options }); },
     label(text, x, y, options = {}) {
-      ctx.save();
-      ctx.font = `${options.size || 48}px 'Chalkboard SE', 'Comic Sans MS', sans-serif`;
-      ctx.fillStyle = options.color || PAL.ink;
-      ctx.textAlign = options.align || "center";
-      ctx.fillText(String(text), x, y);
-      ctx.restore();
+      const target = press ? plate(ink(options.color)) : ctx;
+      target.save();
+      target.font = press ? `800 ${options.size || 48}px 'Trebuchet MS', sans-serif` : `${options.size || 48}px 'Chalkboard SE', 'Comic Sans MS', sans-serif`;
+      target.fillStyle = press ? "#000" : options.color || PAL.ink;
+      target.textAlign = options.align || "center";
+      target.fillText(String(text), x, y);
+      target.restore();
     }
   });
   Object.defineProperty(Math, "random", { value() { throw new Error("Use kit.rng with a stable seed, not Math.random."); }, writable: false });
@@ -61,11 +73,16 @@ function installScene(source, width, style) {
     if (!Number.isFinite(t) || t < 0 || t > scene.duration) throw new Error("Invalid seek time.");
     canvas.width = width; // Reset transforms, clipping, and state before every seek.
     texts = [];
+    if (press) {
+      press.each((g) => { g.reset(); g.setTransform(width / W, 0, 0, width / W, 0, 0); });
+      press.begin(Math.floor(t * 12) / 12);
+    }
     ctx.scale(width / W, width / W);
     ctx.fillStyle = style === "line" ? "#FFFDF8" : PAL.paper;
     ctx.fillRect(0, 0, W, H);
-    const result = scene.draw(ctx, t, kit);
+    const result = scene.draw(ctx, press ? Math.floor(t * 12) / 12 : t, kit);
     if (result && typeof result.then === "function") throw new Error("draw must be synchronous.");
+    if (press) press.print(ctx, { key: Math.floor(t * 12) / 12 });
     const warnings = [];
     for (const item of texts) {
       const [x0, y0, x1, y1] = item.box;

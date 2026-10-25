@@ -139,7 +139,7 @@ test("CLI cannot enter paid generation without explicit limits", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /requires explicit/);
   assert.equal(result.stdout.includes("request_started"), false);
-  assert.throws(() => validateBrief({ ...brief, style: "risograph" }), /Invalid brief/);
+  assert.throws(() => validateBrief({ ...brief, style: "unknown-style" }), /Invalid brief/);
 });
 
 test("approved output increase preserves spent calls and reviewer limits", () => {

@@ -8,14 +8,15 @@ const { verifyScene, renderPreview } = require("../src/harness/render");
 const { runAgent } = require("../src/harness/agent");
 const { syncSkills, readSkill } = require("../src/harness/skills");
 const demo = require("../src/harness/demo");
+const risoDemo = require("../src/harness/riso-demo");
 
 function validateBrief(brief) {
   if (!brief || typeof brief.topic !== "string" || !brief.topic.trim() || typeof brief.audience !== "string" ||
-      typeof brief.takeaway !== "string" || !["line", "watercolor"].includes(brief.style) ||
+      typeof brief.takeaway !== "string" || !["line", "watercolor", "risograph"].includes(brief.style) ||
       !Number.isFinite(brief.duration) || brief.duration < 10 || brief.duration > 15 ||
       !Array.isArray(brief.facts) || !brief.facts.every((item) => typeof item === "string") ||
       !Array.isArray(brief.sources) || !brief.sources.every((item) => typeof item === "string") ||
-      JSON.stringify(brief).length > 12000) throw new Error("Invalid brief: provide topic, audience, takeaway, duration 10–15, style line/watercolor, facts and sources.");
+      JSON.stringify(brief).length > 12000) throw new Error("Invalid brief: provide topic, audience, takeaway, duration 10–15, style line/watercolor/risograph, facts and sources.");
   return brief;
 }
 
@@ -41,7 +42,7 @@ async function main() {
     "max-calls": { type: "string" }, "max-output-tokens": { type: "string" }, width: { type: "string" },
     thinking: { type: "string", default: "medium" }, "review-output-tokens": { type: "string" },
     "approve-output-increase": { type: "boolean", default: false },
-    "approve-request-increase": { type: "boolean", default: false }
+    "approve-request-increase": { type: "boolean", default: false }, style: { type: "string" }
   } });
   const command = positionals[0] || "help";
   if (command === "help") {
@@ -77,9 +78,12 @@ async function main() {
     brief = JSON.parse(fs.readFileSync(path, "utf8"));
   }
   validateBrief(brief);
+  if (values.style) brief = validateBrief({ ...brief, style: values.style });
+  if (command === "resume" && values.style) throw new Error("Choose a style on a new run; resume preserves its approved brief.");
   if (command === "resume" && !values.id) throw new Error("resume requires --id.");
   const id = values.id || `${live ? "scene" : "demo"}-${randomUUID().slice(0, 8)}`;
   const workspace = new Workspace(id, { create: command !== "resume", brief, limits: limits || null });
+  console.log(JSON.stringify({ run: id, command, style: JSON.parse(workspace.read("brief.json")).style }));
   const release = workspace.acquire();
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -89,7 +93,7 @@ async function main() {
   try {
     if (command === "resume") applyResumeLimits(workspace, limits, values["approve-output-increase"], values["approve-request-increase"]);
     if (!live) {
-      workspace.writeScene(demo.source);
+      workspace.writeScene(brief.style === "risograph" ? risoDemo.source : demo.source);
       const verification = await verifyScene(workspace, { signal: controller.signal });
       if (!verification.passed) throw new Error("Offline demo verification failed; inspect the saved verification artifact.");
       await renderPreview(workspace, { signal: controller.signal, width: Number(values.width || 540) });

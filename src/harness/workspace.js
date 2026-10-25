@@ -69,6 +69,7 @@ class Workspace {
   sceneHash() {
     // Cache identity includes the approved brief and the code that actually draws it.
     return digest(JSON.stringify({ scene: this.read("scene.js"), brief: this.read("brief.json"),
+      riso: JSON.parse(this.read("brief.json")).style === "risograph" ? digest(require("./skills").readRisoKit()) : null,
       renderer: ["engine.js", "harness/scene-host.js", "harness/render.js"].map((name) => digest(fs.readFileSync(join(PROJECT, "src", name)))) }));
   }
   artifactDir() {
