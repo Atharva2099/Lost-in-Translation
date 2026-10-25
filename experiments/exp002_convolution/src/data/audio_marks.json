@@ -1,0 +1,242 @@
+[
+  {
+    "time": 1.5,
+    "kind": "cathedral_clap",
+    "label": "Clap your hands once in a vast cathedral"
+  },
+  {
+    "time": 4.55,
+    "kind": "cathedral_clap",
+    "label": "Unspoken watch beat: echo bars rise"
+  },
+  {
+    "time": 10.3,
+    "kind": "sum_chime",
+    "label": "h[0] = 1.0"
+  },
+  {
+    "time": 11.2,
+    "kind": "sum_chime",
+    "label": "h[1] = 0.6"
+  },
+  {
+    "time": 12.3,
+    "kind": "sum_chime",
+    "label": "h[2] = 0.3"
+  },
+  {
+    "time": 13.4,
+    "kind": "sum_chime",
+    "label": "h[3] = 0.1"
+  },
+  {
+    "time": 17.8,
+    "kind": "paper_slide",
+    "label": "quiet 2 launches echo row 1"
+  },
+  {
+    "time": 19.1,
+    "kind": "paper_slide",
+    "label": "louder 3 launches echo row 2"
+  },
+  {
+    "time": 22.9,
+    "kind": "paper_slide",
+    "label": "Watch beat: vertical column 1 aligns"
+  },
+  {
+    "time": 34.0,
+    "kind": "peak_bell",
+    "label": "giving 4.2"
+  },
+  {
+    "time": 44.0,
+    "kind": "paper_flip",
+    "label": "written backwards as n minus k"
+  },
+  {
+    "time": 45.7,
+    "kind": "whoosh",
+    "label": "Transition to Act 2"
+  },
+  {
+    "time": 53.3,
+    "kind": "sum_chime",
+    "label": "fresh head h[0]"
+  },
+  {
+    "time": 57.0,
+    "kind": "sum_chime",
+    "label": "older tail h[1], h[2]"
+  },
+  {
+    "time": 61.6,
+    "kind": "paper_flip",
+    "label": "flip it end for end"
+  },
+  {
+    "time": 66.5,
+    "kind": "peak_bell",
+    "label": "Watch beat: vertical pairs lock in"
+  },
+  {
+    "time": 74.5,
+    "kind": "paper_flip",
+    "label": "flip 4,5,6 into 6,5,4"
+  },
+  {
+    "time": 77.6,
+    "kind": "paper_slide",
+    "label": "Watch beat: strip slides to start position"
+  },
+  {
+    "time": 81.7,
+    "kind": "paper_slide",
+    "label": "Step 0: 1*4 = 4"
+  },
+  {
+    "time": 82.6,
+    "kind": "sum_chime",
+    "label": "output 4"
+  },
+  {
+    "time": 83.5,
+    "kind": "paper_slide",
+    "label": "Step 1: slide to 13"
+  },
+  {
+    "time": 85.5,
+    "kind": "sum_chime",
+    "label": "output 13"
+  },
+  {
+    "time": 86.4,
+    "kind": "paper_slide",
+    "label": "Watch beat: slide to center full overlap"
+  },
+  {
+    "time": 92.0,
+    "kind": "peak_bell",
+    "label": "peaks at 28!"
+  },
+  {
+    "time": 93.1,
+    "kind": "paper_slide",
+    "label": "Step 3: 27"
+  },
+  {
+    "time": 94.8,
+    "kind": "paper_slide",
+    "label": "Step 4: 18"
+  },
+  {
+    "time": 96.1,
+    "kind": "whoosh",
+    "label": "Transition to Act 3"
+  },
+  {
+    "time": 99.9,
+    "kind": "paper_slide",
+    "label": "quarter, half, quarter"
+  },
+  {
+    "time": 102.2,
+    "kind": "paper_slide",
+    "label": "Sliding across noisy signal"
+  },
+  {
+    "time": 107.7,
+    "kind": "peak_bell",
+    "label": "into a smooth curve"
+  },
+  {
+    "time": 108.5,
+    "kind": "paper_slide",
+    "label": "Watch beat: window finishes smoothing"
+  },
+  {
+    "time": 112.5,
+    "kind": "paper_slide",
+    "label": "infinitely thin steps"
+  },
+  {
+    "time": 119.1,
+    "kind": "peak_bell",
+    "label": "continuous convolution integral"
+  },
+  {
+    "time": 120.4,
+    "kind": "whoosh",
+    "label": "Transition to Act 4"
+  },
+  {
+    "time": 124.3,
+    "kind": "paper_flip",
+    "label": "3x3 window"
+  },
+  {
+    "time": 125.7,
+    "kind": "paper_slide",
+    "label": "scanning across image"
+  },
+  {
+    "time": 132.2,
+    "kind": "sum_chime",
+    "label": "soft blur"
+  },
+  {
+    "time": 133.0,
+    "kind": "paper_flip",
+    "label": "Watch beat: stencil flips to [-1, 0, +1] edge kernel"
+  },
+  {
+    "time": 140.0,
+    "kind": "paper_slide",
+    "label": "cancel to zero"
+  },
+  {
+    "time": 142.6,
+    "kind": "peak_bell",
+    "label": "vertical boundary lights up bright (+320)"
+  },
+  {
+    "time": 143.8,
+    "kind": "whoosh",
+    "label": "Transition to Act 5"
+  },
+  {
+    "time": 150.9,
+    "kind": "paper_flip",
+    "label": "skip 180-degree flip"
+  },
+  {
+    "time": 152.3,
+    "kind": "sum_chime",
+    "label": "cross-correlation instead"
+  },
+  {
+    "time": 160.6,
+    "kind": "peak_bell",
+    "label": "learns them already flipped"
+  },
+  {
+    "time": 163.9,
+    "kind": "paper_flip",
+    "label": "flip"
+  },
+  {
+    "time": 164.5,
+    "kind": "paper_slide",
+    "label": "slide"
+  },
+  {
+    "time": 165.3,
+    "kind": "sum_chime",
+    "label": "multiply"
+  },
+  {
+    "time": 166.4,
+    "kind": "peak_bell",
+    "label": "and sum"
+  }
+]
