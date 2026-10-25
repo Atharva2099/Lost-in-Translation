@@ -6,14 +6,14 @@ const { MODELS, outputText } = require("./gemini");
 const { ProjectWorkspace, validateProject, FONT_FAMILIES } = require("./project");
 const { runProjectAgent, approveReviewRetry } = require("./project-agent");
 
-const LIMITS = Object.freeze({ maxCalls: 16, maxOutputTokens: 65536, reviewerMaxOutputTokens: 8192 });
+const LIMITS = Object.freeze({ maxCalls: 22, maxOutputTokens: 65536, reviewerMaxOutputTokens: 8192 });
 const FRAME = Object.freeze({ width: 1280, height: 720, fps: 24 });
 
 function openTopic(topic, { id = `project-${randomUUID().slice(0, 8)}`, duration = 120, style } = {}) {
   if (typeof topic !== "string" || !topic.trim() || topic.trim().length > 500 || /[\u0000-\u001f]/u.test(topic)) {
     throw new Error('Usage: node tools/lit.js create "Your topic" [--id=PROJECT_ID].');
   }
-  if (!Number.isInteger(duration) || duration < 120 || duration > 300) throw new Error("Duration must be an integer from 120 to 300 seconds.");
+  if (!Number.isInteger(duration) || duration < 10 || duration > 300) throw new Error("Duration must be an integer from 10 to 300 seconds.");
   if (style && !["line", "watercolor", "risograph"].includes(style)) throw new Error("Style must be line, watercolor, or risograph.");
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(id)) throw new Error("Invalid project ID.");
   const base = join(RUNS, "projects");

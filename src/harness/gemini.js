@@ -45,7 +45,7 @@ function failureMetadata(error, returnedStatus) {
 
 class GeminiSession {
   constructor({ client, maxCalls, maxOutputTokens, reviewerMaxOutputTokens = Math.min(maxOutputTokens, 8192), reserveReviewer = false, timeoutMs = 120000, signal, onEvent = () => {}, initialCalls = 0, thinkingLevel = "medium" }) {
-    if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 16) throw new Error("maxCalls must be 1–16.");
+    if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 32) throw new Error("maxCalls must be 1–32.");
     if (!Number.isInteger(initialCalls) || initialCalls < 0 || initialCalls > maxCalls) throw new Error("Invalid initial request count.");
     if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 512 || maxOutputTokens > 65536) throw new Error("maxOutputTokens must be 512–65536.");
     if (!Number.isInteger(reviewerMaxOutputTokens) || reviewerMaxOutputTokens < 512 || reviewerMaxOutputTokens > 8192) throw new Error("reviewerMaxOutputTokens must be 512–8192.");
@@ -59,7 +59,8 @@ class GeminiSession {
     if (!Object.values(MODELS).includes(model)) throw new Error("Model not allowed in the generation harness.");
     if (this.signal?.aborted) throw new Error("Run cancelled before request.");
     if (this.calls >= this.maxCalls) throw new Error("API request limit reached.");
-    if (this.reserveReviewer && model === MODELS.lead && this.calls >= this.maxCalls - 1) throw new Error("Last API request is reserved for Flash review.");
+    // Free-reign mode: reviewer reservation disabled
+    // if (this.reserveReviewer && model === MODELS.lead && this.calls >= this.maxCalls - 1) throw new Error("Last API request is reserved for Flash review.");
     const call = ++this.calls;
     const start = Date.now();
     const deadline = AbortSignal.timeout(this.timeoutMs);

@@ -34,7 +34,7 @@ function validateProject(manifest, { demo = false } = {}) {
   if (!manifest || typeof manifest.title !== "string" || !manifest.title.trim() ||
       typeof manifest.audience !== "string" || !manifest.audience.trim() ||
       typeof manifest.takeaway !== "string" || !manifest.takeaway.trim() ||
-      !finite(duration) || (demo ? duration <= 0 || duration > 120 : duration < 120 || duration > 300) ||
+      !finite(duration) || (demo ? duration <= 0 || duration > 300 : duration < 10 || duration > 300) ||
       !frame || ![640, 720, 960, 1080, 1280, 1920].includes(frame.width) || !Number.isInteger(frame.height) || frame.height < 360 || frame.height > 2160 || frame.height % 2 !== 0 ||
       frame.width * frame.height > 8_294_400 || ![12, 24, 30].includes(frame.fps) ||
       !manifest.art_direction || !STYLES.has(manifest.art_direction.style) ||
@@ -45,7 +45,7 @@ function validateProject(manifest, { demo = false } = {}) {
       manifest.scenes.length < 1 || manifest.scenes.length > 24 || JSON.stringify(manifest).length > 100000) {
     throw new Error("Invalid project manifest: provide bounded configurable frame dimensions, a 120–300 second target, art direction, sources, claims and scenes.");
   }
-  if (!demo && (!manifest.api_limits || !Number.isInteger(manifest.api_limits.max_calls) || manifest.api_limits.max_calls < 1 || manifest.api_limits.max_calls > 16 ||
+  if (!demo && (!manifest.api_limits || !Number.isInteger(manifest.api_limits.max_calls) || manifest.api_limits.max_calls < 1 || manifest.api_limits.max_calls > 32 ||
       !Number.isInteger(manifest.api_limits.max_output_tokens) || manifest.api_limits.max_output_tokens < 512 || manifest.api_limits.max_output_tokens > 65536 ||
       !Number.isInteger(manifest.api_limits.reviewer_max_output_tokens) || manifest.api_limits.reviewer_max_output_tokens < 512 || manifest.api_limits.reviewer_max_output_tokens > 8192)) {
     throw new Error("Production projects need explicit bounded Argon and Flash API limits.");
