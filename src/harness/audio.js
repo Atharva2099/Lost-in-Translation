@@ -126,8 +126,27 @@ async function generateSceneAudio(workspace, sceneId, scriptBeats, { session = n
   fs.writeFileSync(srtPath, srt);
   fs.writeFileSync(vttPath, vtt);
 
+  const allWords = segments.flatMap((s) => s.words || []);
+  const cueMap = {};
+  for (const w of allWords) {
+    const clean = String(w.word || "").toLowerCase().replace(/[^\w]/g, "");
+    if (clean && cueMap[clean] === undefined) cueMap[clean] = w.start;
+  }
+  const speechStart = segments.length ? segments[0].start : 0;
+  const speechEnd = segments.length ? segments.at(-1).end : 0;
+  const timing = {
+    scene_id: sceneId,
+    measured_duration: totalDuration,
+    speech_start: speechStart,
+    speech_end: speechEnd,
+    observation_pause: Number(Math.max(0, totalDuration - speechEnd).toFixed(3)),
+    cues: cueMap,
+    words: allWords.map((w) => ({ word: w.word, start: w.start, end: w.end }))
+  };
+
   const narrationManifest = {
     total_duration: totalDuration,
+    timing,
     segments,
     subtitles: cues,
     master_audio: "audio/master_audio.wav",
@@ -139,6 +158,44 @@ async function generateSceneAudio(workspace, sceneId, scriptBeats, { session = n
   return narrationManifest;
 }
 
+async function generateProjectAudioTimings(project, { session = null, offline = true, voice = "Puck", style = "clear and engaging", generator = generateSceneAudio } = {}) {
+  const narration = project.manifest.narration || [];
+  if (!narration.length) return [];
+  const tasks = project.manifest.scenes.map(async (sceneSpec) => {
+    const clauses = narration.filter((entry) => entry.scene_id === sceneSpec.id && typeof entry.text === "string" && entry.text.trim());
+    if (!clauses.length) return null;
+    const beats = clauses.map((clause, idx) => ({
+      id: clause.id || `${sceneSpec.id}_b${idx}`,
+      text: clause.text,
+      pause_before: idx === 0 ? Math.max(0.1, Number(clause.start || 0.3)) : 0.3,
+      pause_after: 0.4
+    }));
+    const sceneWs = project.scene(sceneSpec.id);
+    const audioManifest = await generator(sceneWs, sceneSpec.id, beats, {
+      session: offline ? null : session,
+      offline,
+      voice,
+      style
+    });
+    sceneSpec.audio = audioManifest.master_audio;
+    sceneSpec.subtitles_srt = audioManifest.subtitles_srt;
+    sceneSpec.subtitles_vtt = audioManifest.subtitles_vtt;
+    sceneSpec.subtitles = audioManifest.subtitles;
+    sceneSpec.measured_audio_duration = audioManifest.total_duration;
+    if (audioManifest.timing) sceneSpec.timing = audioManifest.timing;
+    return { scene_id: sceneSpec.id, ...audioManifest };
+  });
+  const results = (await Promise.all(tasks)).filter(Boolean);
+  if (results.length) {
+    project.workspace.write("project.json", JSON.stringify(project.manifest, null, 2));
+    for (const item of results) project.scene(item.scene_id);
+    project.workspace.state.audio_pregenerated = true;
+    project.workspace.save();
+  }
+  return results;
+}
+
 module.exports = {
-  generateSceneAudio
+  generateSceneAudio,
+  generateProjectAudioTimings
 };

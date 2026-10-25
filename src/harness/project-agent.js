@@ -1,5 +1,5 @@
-const { MODELS } = require("./gemini");
-const { reviewPreview } = require("./tools");
+const { MODELS, outputText } = require("./gemini");
+const { reviewPreview, reviewBoundary } = require("./tools");
 const { readSkill } = require("./skills");
 const { verifyScene, renderPreview, isGeneratedSceneDefect } = require("./render");
 const { assembleProject, sceneBrief, sceneGeometry } = require("./project");
@@ -327,4 +327,164 @@ async function runProjectAgent(project, session, { signal, tools = makeProjectTo
   }
 }
 
-module.exports = { PROJECT_TOOLS, systemFor, makeProjectTools, runProjectAgent, ensureSceneStages, approveReviewRetry, StageFailure };
+function extractSceneSourceFromResponse(response) {
+  for (const step of response?.steps || []) {
+    if (step.type === "function_call" && step.name === "write_scene" && typeof step.arguments?.source === "string") {
+      return step.arguments.source;
+    }
+  }
+  let text = outputText(response || {}).trim();
+  const fenced = /^```(?:javascript|js)?\s*\n([\s\S]*?)\n```$/i.exec(text);
+  if (fenced) text = fenced[1].trim();
+  return text || null;
+}
+
+async function runSceneUnitWorker(project, scene, session, { signal, verifier = verifyScene, renderer = renderPreview, reviewer = reviewPreview, sceneAuthor } = {}) {
+  const gate = scene.gate({ requireReview: true });
+  if (gate.passed) {
+    return { id: scene.id, hash: gate.hash, cached: true, passed: true, verification: scene.state.verification, preview: scene.state.preview, review: scene.state.review };
+  }
+  const fs = require("node:fs");
+  let hasSource = fs.existsSync(scene.path("scene.js"));
+  if (!hasSource) {
+    const brief = JSON.parse(scene.read("brief.json"));
+    let source;
+    if (typeof sceneAuthor === "function") {
+      source = await sceneAuthor(scene, brief, session);
+    } else {
+      const prompt = `Author scene "${scene.id}" (${brief.duration}s). Return ONLY the JavaScript function body ending in return {duration:${brief.duration},draw(ctx,t,kit){...}}. Honor entry_anchor=${JSON.stringify(brief.entry_anchor || null)} and exit_anchor=${JSON.stringify(brief.exit_anchor || null)}. Scene brief: ${JSON.stringify(brief)}`;
+      const response = await session.create(MODELS.lead, [{ type: "user_input", content: [{ type: "text", text: prompt }] }], [], systemFor(project));
+      source = extractSceneSourceFromResponse(response);
+    }
+    if (!source) throw new Error(`Worker for scene ${scene.id} produced no scene source.`);
+    scene.writeScene(source);
+  }
+  let stages = await ensureSceneStages(project, scene, session, { signal, verifier, renderer, reviewer });
+  while ((!stages.verification?.passed || stages.review?.findings?.some((f) => ["major", "critical"].includes(f.severity))) && scene.state.revisions < 4) {
+    const brief = JSON.parse(scene.read("brief.json"));
+    const currentCode = scene.read("scene.js");
+    let repaired;
+    if (typeof sceneAuthor === "function") {
+      repaired = await sceneAuthor(scene, brief, session, { repair: true, stages, currentCode });
+    } else {
+      const repairPrompt = `Repair scene "${scene.id}". Current code:\n${currentCode}\nFeedback: ${JSON.stringify({ verification: stages.verification, review: stages.review })}\nReturn ONLY the corrected JavaScript function body.`;
+      const response = await session.create(MODELS.lead, [{ type: "user_input", content: [{ type: "text", text: repairPrompt }] }], [], systemFor(project));
+      repaired = extractSceneSourceFromResponse(response);
+    }
+    if (!repaired || repaired === currentCode) break;
+    scene.writeScene(repaired);
+    stages = await ensureSceneStages(project, scene, session, { signal, verifier, renderer, reviewer });
+  }
+  const finalGate = scene.gate({ requireReview: true });
+  return { id: scene.id, hash: scene.sceneHash(), cached: false, passed: finalGate.passed, ...stages };
+}
+
+async function dispatchParallelSwarm(project, session, concurrencyOrOptions = 4, maybeOptions = {}) {
+  const isObj = typeof concurrencyOrOptions === "object" && concurrencyOrOptions !== null;
+  const options = isObj ? concurrencyOrOptions : maybeOptions;
+  const concurrency = isObj ? (options.concurrency || 4) : (Number.isInteger(concurrencyOrOptions) && concurrencyOrOptions > 0 ? concurrencyOrOptions : 4);
+  const {
+    signal,
+    verifier = verifyScene,
+    renderer = renderPreview,
+    reviewer = reviewPreview,
+    boundaryReviewer = reviewBoundary,
+    assembler = assembleProject,
+    sceneAuthor,
+    boundaryPatcher,
+    skipAssembly = false
+  } = options;
+
+  const root = project.workspace;
+  root.state.status = "running";
+  root.save();
+
+  const scenes = project.scenes();
+  const sceneResults = new Map();
+
+  // Tier 1: Parallel Scene Worker Swarm in bounded concurrency batches via Promise.allSettled
+  for (let i = 0; i < scenes.length; i += concurrency) {
+    if (signal?.aborted) throw new Error("Parallel swarm cancelled.");
+    const batch = scenes.slice(i, i + concurrency);
+    const settled = await Promise.allSettled(
+      batch.map((scene) => runSceneUnitWorker(project, scene, session, { signal, verifier, renderer, reviewer, sceneAuthor }))
+    );
+    for (const [idx, outcome] of settled.entries()) {
+      if (outcome.status === "rejected") throw outcome.reason;
+      sceneResults.set(batch[idx].id, outcome.value);
+    }
+  }
+
+  // Tier 2: Parallel 10-Second Boundary-Stitch Inspectors across adjacent cuts
+  const pairs = [];
+  for (let i = 0; i < scenes.length - 1; i++) {
+    pairs.push([scenes[i], scenes[i + 1]]);
+  }
+
+  const boundaryResults = [];
+  if (pairs.length > 0) {
+    const settledBoundaries = await Promise.allSettled(
+      pairs.map(([sceneA, sceneB]) => boundaryReviewer(sceneA, sceneB, session, { signal }))
+    );
+    for (const [idx, outcome] of settledBoundaries.entries()) {
+      if (outcome.status === "rejected") throw outcome.reason;
+      let bRes = outcome.value;
+      const [sceneA, sceneB] = pairs[idx];
+
+      // Isolated Surgical Patching: if Cut A -> B fails continuity, ONLY patch Scene B's entry code!
+      if (!bRes.passed && sceneB.state.revisions < 4) {
+        const briefA = JSON.parse(sceneA.read("brief.json"));
+        const briefB = JSON.parse(sceneB.read("brief.json"));
+        const currentCodeB = sceneB.read("scene.js");
+        let patchedCodeB;
+        if (typeof boundaryPatcher === "function") {
+          patchedCodeB = await boundaryPatcher(sceneA, sceneB, bRes, session);
+        } else if (typeof sceneAuthor === "function") {
+          patchedCodeB = await sceneAuthor(sceneB, briefB, session, { boundaryRepair: true, fromScene: sceneA, boundaryReview: bRes, currentCode: currentCodeB });
+        } else {
+          const patchPrompt = `Boundary-stitch continuity defect detected at Cut "${sceneA.id}" -> "${sceneB.id}".
+Only Scene "${sceneB.id}" entry code may be patched; Scene "${sceneA.id}" is locked.
+Previous scene exit_anchor: ${JSON.stringify(briefA.exit_anchor || null)}
+Target scene entry_anchor: ${JSON.stringify(briefB.entry_anchor || null)}
+Boundary findings: ${JSON.stringify(bRes.findings)}
+Current Scene "${sceneB.id}" code:\n${currentCodeB}\nReturn ONLY the patched JavaScript function body for Scene "${sceneB.id}".`;
+          const response = await session.create(MODELS.lead, [{ type: "user_input", content: [{ type: "text", text: patchPrompt }] }], [], systemFor(project));
+          patchedCodeB = extractSceneSourceFromResponse(response);
+        }
+        if (patchedCodeB && patchedCodeB !== currentCodeB) {
+          sceneB.writeScene(patchedCodeB);
+          const stagesB = await ensureSceneStages(project, sceneB, session, { signal, verifier, renderer, reviewer });
+          sceneResults.set(sceneB.id, { id: sceneB.id, hash: sceneB.sceneHash(), cached: false, patched_for_boundary: `${sceneA.id}->${sceneB.id}`, passed: sceneB.gate({ requireReview: true }).passed, ...stagesB });
+          bRes = await boundaryReviewer(sceneA, sceneB, session, { signal });
+        }
+      }
+      boundaryResults.push(bRes);
+    }
+  }
+
+  const allScenesPassed = scenes.every((s) => s.gate({ requireReview: true }).passed);
+  const allBoundariesPassed = boundaryResults.every((b) => b.passed);
+  let assembly = null;
+  if (allScenesPassed && allBoundariesPassed && !skipAssembly) {
+    assembly = await assembler(project, { signal });
+  }
+  root.state.status = allScenesPassed && allBoundariesPassed
+    ? (project.workspace.state.audio ? "needs_audiovisual_review" : "ready_for_human_review")
+    : "paused";
+  root.state.swarm = {
+    concurrency,
+    scenes: scenes.map((s) => sceneResults.get(s.id)),
+    boundaries: boundaryResults
+  };
+  root.save();
+
+  return {
+    passed: allScenesPassed && allBoundariesPassed && root.state.status === "ready_for_human_review",
+    status: root.state.status,
+    scenes: scenes.map((s) => sceneResults.get(s.id)),
+    boundaries: boundaryResults,
+    assembly
+  };
+}
+
+module.exports = { PROJECT_TOOLS, systemFor, makeProjectTools, runProjectAgent, dispatchParallelSwarm, ensureSceneStages, approveReviewRetry, StageFailure };

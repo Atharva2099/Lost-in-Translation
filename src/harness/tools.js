@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const { join } = require("node:path");
 const { MODELS, outputText, validateReview } = require("./gemini");
-const { verifyScene, renderPreview } = require("./render");
+const { verifyScene, renderPreview, extractBoundaryClip } = require("./render");
 const { readSkill, NAMES } = require("./skills");
 const { PROJECT, atomicWrite, noSymlinks } = require("./workspace");
 
@@ -65,6 +65,105 @@ The four following stills are at 15%,45%,70%,95% of duration; the final attachme
   return workspace.state.review;
 }
 
+function readSceneBriefSafe(scene) {
+  try {
+    if (scene && typeof scene.read === "function") return JSON.parse(scene.read("brief.json"));
+    if (scene && typeof scene.brief === "object") return scene.brief;
+  } catch { /* ignore */ }
+  return {};
+}
+
+async function reviewBoundary(sceneA, sceneB, session, { outPath, projectRoot, windowSeconds = 5.0, signal, extractor = extractBoundaryClip } = {}) {
+  const idA = sceneA?.id || "scene_a";
+  const idB = sceneB?.id || "scene_b";
+  const briefA = readSceneBriefSafe(sceneA);
+  const briefB = readSceneBriefSafe(sceneB);
+  const exitAnchor = briefA.exit_anchor || briefA.scene?.exit_anchor || sceneA?.exit_anchor || null;
+  const entryAnchor = briefB.entry_anchor || briefB.scene?.entry_anchor || sceneB?.entry_anchor || null;
+  const activeAnchor = entryAnchor || exitAnchor || {};
+  const focalObject = activeAnchor.focal_object || activeAnchor.object || "focal_mechanism";
+  const expectedPos = activeAnchor.position || (Number.isFinite(activeAnchor.x) ? [activeAnchor.x, activeAnchor.y ?? 0] : "unspecified");
+  const expectedColor = activeAnchor.active_color || activeAnchor.color || "unspecified";
+
+  const { dirname } = require("node:path");
+  const inferredProjectRoot = projectRoot || (sceneB?.base && sceneB.base.endsWith("scenes") ? dirname(sceneB.base) : null);
+  const boundariesDir = inferredProjectRoot
+    ? join(inferredProjectRoot, "boundaries")
+    : (typeof sceneB?.artifactDir === "function" ? sceneB.artifactDir() : (sceneB?.root || join(PROJECT, "build/runs")));
+  fs.mkdirSync(boundariesDir, { recursive: true, mode: 0o700 });
+  const targetClipPath = outPath || join(boundariesDir, `cut_${idA}_${idB}.mp4`);
+
+  const clipInfo = await extractor(sceneA, sceneB, targetClipPath, { windowSeconds, signal });
+  const bytes = fs.readFileSync(clipInfo.path);
+  if (bytes.length > 8 * 1024 * 1024) throw new Error("Boundary review clip exceeds upload limit.");
+
+  const prompt = `You are the Continuity Inspector for an animated film.
+Watch this ${clipInfo.duration}-second clip. A scene cut occurs at EXACTLY t = ${clipInfo.cut_time}s (last ${clipInfo.tail_duration}s of "${idA}" -> CUT at ${clipInfo.cut_time}s -> first ${clipInfo.head_duration}s of "${idB}").
+
+Audited Handover Contract:
+- Focal Object: ${focalObject}
+- Expected Cut Position: ${JSON.stringify(expectedPos)}
+- Expected Cut Color: ${expectedColor}
+- Full Handoff Data: ${JSON.stringify({ from_scene: idA, to_scene: idB, exit_anchor: exitAnchor, entry_anchor: entryAnchor })}
+
+Scrutinize:
+1. Spatial Jumps: Does ${focalObject} teleport across the screen at t = ${clipInfo.cut_time}s?
+2. Velocity/Momentum: Does motion unnaturally freeze or violently reverse across the cut?
+3. Color Consistency: Did the visual meaning of key colors invert?
+4. Subtitle Handover: Does trailing text collide with opening text?
+
+Return JSON only:
+{"cut_timestamp":${clipInfo.cut_time},"passed":true,"findings":[{"severity":"major","category":"spatial_teleportation","timestamp_seconds":${clipInfo.cut_time},"evidence":"specific observation","patch_target":"scene_B_entry","recommended_adjustment":"expected adjustment","expected":"expected adjustment"}]}.
+Use severity minor/moderate/major/critical and timestamps 0..${clipInfo.duration}. Empty findings are allowed.`;
+
+  const content = [
+    { type: "text", text: prompt },
+    { type: "video", mime_type: "video/mp4", data: bytes.toString("base64") }
+  ];
+
+  const response = await session.create(MODELS.reviewer, content);
+  if (response.status !== "completed") throw new Error("Boundary Flash review did not complete.");
+  const text = outputText(response);
+  let normalizedText = text;
+  try {
+    let raw = text.trim();
+    const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/i.exec(raw);
+    if (fenced) raw = fenced[1];
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.findings)) {
+      parsed.findings = parsed.findings.map((f) => ({
+        ...f,
+        timestamp_seconds: Number.isFinite(f.timestamp_seconds) ? f.timestamp_seconds : (Number.isFinite(parsed.cut_timestamp) ? parsed.cut_timestamp : clipInfo.cut_time),
+        expected: f.expected || f.recommended_adjustment || "Maintain smooth spatial and visual continuity across the cut."
+      }));
+      normalizedText = JSON.stringify(parsed);
+    }
+  } catch { /* validateReview will handle malformed JSON */ }
+  const maxValidTs = Math.max(clipInfo.duration, Number((clipInfo.tail_duration + clipInfo.head_duration + 0.5).toFixed(3)));
+  const review = validateReview(normalizedText, maxValidTs);
+  const passed = !review.findings.some((f) => ["major", "critical"].includes(f.severity));
+  const result = {
+    passed,
+    cut_timestamp: clipInfo.cut_time,
+    cut_time: clipInfo.cut_time,
+    boundary: `${idA}->${idB}`,
+    from_scene_id: idA,
+    target_scene_id: idB,
+    duration: clipInfo.duration,
+    clip: clipInfo.path,
+    findings: review.findings
+  };
+  try {
+    const reviewFile = join(boundariesDir, `cut_${idA}_${idB}_review.json`);
+    atomicWrite(reviewFile, JSON.stringify(result, null, 2));
+  } catch { /* ignore if outside workspace */ }
+  if (sceneB && sceneB.state && typeof sceneB.save === "function") {
+    sceneB.state.boundary_review = result;
+    sceneB.save();
+  }
+  return result;
+}
+
 function makeTools(workspace, { session, signal, verifier = verifyScene, renderer = renderPreview, skillReader = readSkill } = {}) {
   const handlers = {
     read_brief: () => JSON.parse(workspace.read("brief.json")),
@@ -112,4 +211,4 @@ function makeTools(workspace, { session, signal, verifier = verifyScene, rendere
   return { declarations: TOOLS, execute };
 }
 
-module.exports = { TOOLS, makeTools, reviewPreview };
+module.exports = { TOOLS, makeTools, reviewPreview, reviewBoundary };

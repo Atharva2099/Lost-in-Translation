@@ -12,6 +12,31 @@ function validateTypography(typography) {
     [400, 500, 600, 700, 800, 900].includes(typography.font_weight) &&
     Number.isInteger(typography.label_size) && typography.label_size >= 24 && typography.label_size <= 96);
 }
+function validateAnchor(anchor, label = "anchor") {
+  if (anchor === undefined || anchor === null) return true;
+  if (typeof anchor !== "object" || Array.isArray(anchor)) {
+    throw new Error(`Invalid ${label}: must be an object with spatial/velocity handoff coordinates.`);
+  }
+  const numericKeys = ["x", "y", "vx", "vy", "v", "r", "scale", "alpha", "rotation"];
+  for (const key of numericKeys) {
+    if (anchor[key] !== undefined && !finite(anchor[key])) {
+      throw new Error(`Invalid ${label}: ${key} must be a finite number.`);
+    }
+  }
+  const vecKeys = ["position", "velocity"];
+  for (const key of vecKeys) {
+    if (anchor[key] !== undefined && (!Array.isArray(anchor[key]) || anchor[key].length !== 2 || !anchor[key].every(finite))) {
+      throw new Error(`Invalid ${label}: ${key} must be a [x, y] pair of finite numbers.`);
+    }
+  }
+  const stringKeys = ["object", "focal_object", "id", "color", "active_color", "state", "visual_state", "description", "label"];
+  for (const key of stringKeys) {
+    if (anchor[key] !== undefined && (typeof anchor[key] !== "string" || !anchor[key].trim())) {
+      throw new Error(`Invalid ${label}: ${key} must be a non-empty string.`);
+    }
+  }
+  return true;
+}
 const FAILURE_COVERAGE = Object.freeze([
   { failure: "spline corner loops", status: "implemented", intervention: "drawing adapter densifies and normalizes closed paths" },
   { failure: "text overlap and overflow", status: "implemented", intervention: "sampled-frame geometry bounds" },
@@ -75,8 +100,35 @@ function validateProject(manifest, { demo = false } = {}) {
     claimIds.add(claim.id);
   }
   const claimRef = new Set(claimIds);
-  for (const scene of manifest.scenes) {
+  for (const [idx, scene] of manifest.scenes.entries()) {
     if (scene.claim_ids && (!Array.isArray(scene.claim_ids) || scene.claim_ids.some((id) => !claimRef.has(id)))) throw new Error(`Scene ${scene.id} references an unknown claim.`);
+    validateAnchor(scene.entry_anchor, `scene ${scene.id} entry_anchor`);
+    validateAnchor(scene.exit_anchor, `scene ${scene.id} exit_anchor`);
+    if (idx > 0) {
+      const prev = manifest.scenes[idx - 1];
+      if (prev.exit_anchor && scene.entry_anchor && !scene.entry_anchor.allow_jump) {
+        const prevObj = prev.exit_anchor.focal_object || prev.exit_anchor.object;
+        const currObj = scene.entry_anchor.focal_object || scene.entry_anchor.object;
+        if (prevObj && currObj && prevObj !== currObj) {
+          throw new Error(`Scene ${scene.id} entry_anchor focal_object (${currObj}) does not match previous scene ${prev.id} exit_anchor (${prevObj}).`);
+        }
+        const prevColor = prev.exit_anchor.active_color || prev.exit_anchor.color;
+        const currColor = scene.entry_anchor.active_color || scene.entry_anchor.color;
+        if (prevColor && currColor && prevColor !== currColor) {
+          throw new Error(`Scene ${scene.id} entry_anchor active_color (${currColor}) does not match previous scene ${prev.id} exit_anchor (${prevColor}).`);
+        }
+        const prevX = Array.isArray(prev.exit_anchor.position) ? prev.exit_anchor.position[0] : prev.exit_anchor.x;
+        const currX = Array.isArray(scene.entry_anchor.position) ? scene.entry_anchor.position[0] : scene.entry_anchor.x;
+        const prevY = Array.isArray(prev.exit_anchor.position) ? prev.exit_anchor.position[1] : prev.exit_anchor.y;
+        const currY = Array.isArray(scene.entry_anchor.position) ? scene.entry_anchor.position[1] : scene.entry_anchor.y;
+        if (finite(prevX) && finite(currX) && Math.abs(prevX - currX) > 1e-3) {
+          throw new Error(`Scene ${scene.id} entry_anchor x (${currX}) does not match previous scene ${prev.id} exit_anchor x (${prevX}).`);
+        }
+        if (finite(prevY) && finite(currY) && Math.abs(prevY - currY) > 1e-3) {
+          throw new Error(`Scene ${scene.id} entry_anchor y (${currY}) does not match previous scene ${prev.id} exit_anchor y (${prevY}).`);
+        }
+      }
+    }
     sceneGeometry(manifest, scene);
   }
   const narration = manifest.narration || [];
@@ -116,7 +168,22 @@ function sceneBrief(manifest, scene) {
     narration: (manifest.narration || []).filter((entry) => entry.scene_id === scene.id),
     captions: (manifest.captions || []).filter((entry) => entry.scene_id === scene.id),
     observation_windows: (manifest.observation_windows || []).filter((entry) => entry.scene_id === scene.id),
-    scene: { id: scene.id, order: scene.order, purpose: scene.purpose || "Explain one part of the takeaway.", transition: scene.transition || "cut" }
+    ...(scene.entry_anchor ? { entry_anchor: scene.entry_anchor } : {}),
+    ...(scene.exit_anchor ? { exit_anchor: scene.exit_anchor } : {}),
+    ...(scene.audio ? { audio: scene.audio } : {}),
+    ...(scene.subtitles_srt ? { subtitles_srt: scene.subtitles_srt } : {}),
+    ...(scene.subtitles_vtt ? { subtitles_vtt: scene.subtitles_vtt } : {}),
+    ...(scene.subtitles ? { subtitles: scene.subtitles } : {}),
+    ...(scene.measured_audio_duration !== undefined ? { measured_audio_duration: scene.measured_audio_duration } : {}),
+    ...(scene.timing ? { timing: scene.timing } : {}),
+    scene: {
+      id: scene.id,
+      order: scene.order,
+      purpose: scene.purpose || "Explain one part of the takeaway.",
+      transition: scene.transition || "cut",
+      ...(scene.entry_anchor ? { entry_anchor: scene.entry_anchor } : {}),
+      ...(scene.exit_anchor ? { exit_anchor: scene.exit_anchor } : {})
+    }
   };
 }
 
@@ -314,4 +381,4 @@ async function assembleProject(project, { signal, allowUnreviewed = false } = {}
   return project.workspace.state.assembly;
 }
 
-module.exports = { validateProject, sceneBrief, sceneGeometry, validateTypography, FONT_FAMILIES, ProjectWorkspace, assembleProject, FAILURE_COVERAGE };
+module.exports = { validateProject, validateAnchor, sceneBrief, sceneGeometry, validateTypography, FONT_FAMILIES, ProjectWorkspace, assembleProject, FAILURE_COVERAGE };

@@ -5,6 +5,7 @@ const { Workspace, RUNS, PROJECT, noSymlinks } = require("./workspace");
 const { MODELS, outputText } = require("./gemini");
 const { ProjectWorkspace, validateProject, FONT_FAMILIES } = require("./project");
 const { runProjectAgent, approveReviewRetry } = require("./project-agent");
+const { generateSceneAudio, generateProjectAudioTimings } = require("./audio");
 
 const LIMITS = Object.freeze({ maxCalls: 22, maxOutputTokens: 65536, reviewerMaxOutputTokens: 8192 });
 const FRAME = Object.freeze({ width: 1280, height: 720, fps: 24 });
@@ -132,7 +133,15 @@ function manifestFrom(response, topic, research, limits) {
   return validateProject(canonical);
 }
 
-async function createProject(workspace, session, { signal, retryPlanning = false, approveReviewRetry: retryReview = false, log = () => {}, produce = runProjectAgent } = {}) {
+async function pregenerateProjectAudio(project, { session = null, offline = true, audioGenerator = generateSceneAudio, log = () => {} } = {}) {
+  const generated = await generateProjectAudioTimings(project, { session, offline, generator: audioGenerator });
+  if (generated.length) {
+    log(`Pre-generated audio and subtitles for ${generated.length} scene(s).`);
+  }
+  return generated;
+}
+
+async function createProject(workspace, session, { signal, retryPlanning = false, approveReviewRetry: retryReview = false, offlineAudio = true, audioGenerator = generateSceneAudio, log = () => {}, produce = runProjectAgent } = {}) {
   const topic = JSON.parse(workspace.read("topic.json"));
   try {
   if (!fs.existsSync(workspace.path("project.json"))) {
@@ -144,7 +153,8 @@ async function createProject(workspace, session, { signal, retryPlanning = false
       title: "string", audience: "string", takeaway: "string", target_duration: topic.duration, frame: topic.frame,
       art_direction: { style: topic.style || "line|watercolor|risograph", palette: { paper: "CSS color", ink: "CSS color", accent: "CSS color" },
         typography: { font_family: [...FONT_FAMILIES].join("|"), font_weight: 700, label_size: 48 }, recurring_objects: ["string"], capabilities: ["string"] },
-      scenes: [{ id: "safe-id", order: 0, duration: "seconds", purpose: "string", claim_ids: ["claim-id"], transition: "cut" }],
+      scenes: [{ id: "safe-id", order: 0, duration: "seconds", purpose: "string", claim_ids: ["claim-id"], transition: "cut",
+        entry_anchor: { object: "string", x: 540, y: 360, vx: 0, vy: 0 }, exit_anchor: { object: "string", x: 540, y: 360, vx: 0, vy: 0 } }],
       claims: [{ id: "claim-id", source_ids: ["source-1"], evidence: "supported claim", uncertainty: "string", simplification: "string" }],
       narration: [{ scene_id: "safe-id", start: 0, end: 1, text: "string" }],
       captions: [{ scene_id: "safe-id", start: 0, end: 1, text: "string" }],
@@ -165,6 +175,9 @@ async function createProject(workspace, session, { signal, retryPlanning = false
   const project = new ProjectWorkspace(workspace.id);
   // Keep event accounting and production mutations on the same state object.
   project.workspace = workspace;
+  if (!workspace.state.audio_pregenerated && (project.manifest.narration || []).length > 0) {
+    await pregenerateProjectAudio(project, { session, offline: offlineAudio, audioGenerator, log });
+  }
   if (retryReview) approveReviewRetry(project);
   return await produce(project, session, { signal });
   } catch (error) {
@@ -174,4 +187,4 @@ async function createProject(workspace, session, { signal, retryPlanning = false
   }
 }
 
-module.exports = { LIMITS, FRAME, openTopic, researchFrom, manifestFrom, createProject };
+module.exports = { LIMITS, FRAME, openTopic, researchFrom, manifestFrom, pregenerateProjectAudio, createProject };

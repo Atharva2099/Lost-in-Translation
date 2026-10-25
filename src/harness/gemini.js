@@ -59,8 +59,7 @@ class GeminiSession {
     if (!Object.values(MODELS).includes(model)) throw new Error("Model not allowed in the generation harness.");
     if (this.signal?.aborted) throw new Error("Run cancelled before request.");
     if (this.calls >= this.maxCalls) throw new Error("API request limit reached.");
-    // Free-reign mode: reviewer reservation disabled
-    // if (this.reserveReviewer && model === MODELS.lead && this.calls >= this.maxCalls - 1) throw new Error("Last API request is reserved for Flash review.");
+    if (this.reserveReviewer && model === MODELS.lead && this.calls >= this.maxCalls - 1) throw new Error("Last API request is reserved for Flash review.");
     const call = ++this.calls;
     const start = Date.now();
     const deadline = AbortSignal.timeout(this.timeoutMs);

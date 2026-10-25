@@ -67,7 +67,10 @@ function renderSettings(brief, width) {
   return { width, height: outputHeight, style: brief.style, configuration: {
     logicalWidth, logicalHeight, outputHeight, duration: brief.duration,
     safeRegion: geometry.safe_region, typography, density: brief.density_policy || { maxWords: 30, maxLongBlocks: 2 }, palette: brief.palette || {},
-    subtitles: brief.subtitles || []
+    subtitles: brief.subtitles || [],
+    entryAnchor: brief.entry_anchor || brief.scene?.entry_anchor || null,
+    exitAnchor: brief.exit_anchor || brief.scene?.exit_anchor || null,
+    timing: brief.timing || null
   } };
 }
 
@@ -282,4 +285,112 @@ async function renderPreview(workspace, { signal, width = 540, fps = 24, timeout
   return workspace.state.preview;
 }
 
-module.exports = { verifyScene, renderPreview, openScene, withBrowser, renderSettings, isGeneratedSceneDefect };
+function resolveSceneVideoPath(scene) {
+  if (typeof scene === "string") return scene;
+  if (!scene || typeof scene !== "object") throw new Error("Invalid scene reference for boundary extraction.");
+  if (typeof scene.path === "string" && scene.path.endsWith(".mp4")) return scene.path;
+  if (typeof scene.file === "string" && scene.file.endsWith(".mp4")) return scene.file;
+  if (typeof scene.artifactDir === "function") {
+    const candidate = join(scene.artifactDir(), "preview.mp4");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  if (scene.root && scene.state?.preview?.file) {
+    const candidate = join(scene.root, scene.state.preview.file);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Rendered preview video not found for scene ${scene.id || "unknown"}.`);
+}
+
+function probeVideoMeta(videoPath, signal) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffprobe", [
+      "-v", "error",
+      "-show_entries", "stream=codec_type,width,height,r_frame_rate",
+      "-show_entries", "format=duration",
+      "-of", "json",
+      videoPath
+    ], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH }, signal, timeout: 15000 });
+    let text = "";
+    child.stdout.on("data", (chunk) => { text += chunk; if (text.length > 64000) child.kill(); });
+    child.on("error", () => reject(new Error("ffprobe failed during boundary probe.")));
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`ffprobe exited with ${code} on ${videoPath}.`));
+      try {
+        const info = JSON.parse(text);
+        const duration = Number(info.format?.duration);
+        if (!Number.isFinite(duration) || duration <= 0) throw new Error("Invalid video duration.");
+        const hasAudio = Boolean(info.streams?.some((s) => s.codec_type === "audio"));
+        resolve({ duration, hasAudio });
+      } catch (err) { reject(err); }
+    });
+  });
+}
+
+function runFfmpeg(args, signal) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"], env: { PATH: process.env.PATH }, signal, timeout: 30000 });
+    let errText = "";
+    child.stderr.on("data", (chunk) => { if (errText.length < 4000) errText += chunk; });
+    child.on("error", () => reject(new Error("FFmpeg boundary command failed.")));
+    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg boundary extraction failed: ${errText.slice(0, 300)}`)));
+  });
+}
+
+async function extractBoundaryClip(sceneA, sceneB, outPath, { windowSeconds = 5.0, signal } = {}) {
+  if (!outPath || typeof outPath !== "string") throw new Error("extractBoundaryClip requires an output file path.");
+  const startWall = Date.now();
+  const pathA = resolveSceneVideoPath(sceneA);
+  const pathB = resolveSceneVideoPath(sceneB);
+  if (!fs.existsSync(pathA) || !fs.existsSync(pathB)) {
+    throw new Error("Both adjacent scenes must have rendered MP4 files before boundary extraction.");
+  }
+  const [metaA, metaB] = await Promise.all([probeVideoMeta(pathA, signal), probeVideoMeta(pathB, signal)]);
+  const tailDuration = Number(Math.min(windowSeconds, metaA.duration).toFixed(3));
+  const headDuration = Number(Math.min(windowSeconds, metaB.duration).toFixed(3));
+  const startA = Number(Math.max(0, metaA.duration - tailDuration).toFixed(3));
+
+  const { dirname } = require("node:path");
+  const { randomUUID } = require("node:crypto");
+  const outDir = dirname(outPath);
+  fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+  const uid = randomUUID().slice(0, 8);
+  const partA = join(outDir, `.boundary_a_${uid}.mp4`);
+  const partB = join(outDir, `.boundary_b_${uid}.mp4`);
+  const concatFile = join(outDir, `.boundary_concat_${uid}.txt`);
+  const tempOut = `${outPath}.${uid}.tmp.mp4`;
+
+  const keepAudio = metaA.hasAudio && metaB.hasAudio;
+  const buildSliceArgs = (inputPath, ss, dur, targetPath) => {
+    const args = ["-y", "-loglevel", "error", "-ss", String(ss), "-t", String(dur), "-i", inputPath, "-map", "0:v:0"];
+    if (keepAudio) args.push("-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2");
+    else args.push("-an");
+    args.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p", targetPath);
+    return args;
+  };
+
+  try {
+    await Promise.all([
+      runFfmpeg(buildSliceArgs(pathA, startA, tailDuration, partA), signal),
+      runFfmpeg(buildSliceArgs(pathB, 0, headDuration, partB), signal)
+    ]);
+    fs.writeFileSync(concatFile, `file '${partA.replaceAll("'", "'\\''")}'\nfile '${partB.replaceAll("'", "'\\''")}'\n`, { mode: 0o600 });
+    await runFfmpeg(["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", concatFile, "-c", "copy", "-movflags", "+faststart", tempOut], signal);
+    fs.renameSync(tempOut, outPath);
+  } finally {
+    for (const f of [partA, partB, concatFile, tempOut]) {
+      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch { /* ignore cleanup errors */ }
+    }
+  }
+
+  const outMeta = await probeVideoMeta(outPath, signal);
+  return {
+    path: outPath,
+    duration: Number(outMeta.duration.toFixed(3)),
+    cut_time: tailDuration,
+    tail_duration: tailDuration,
+    head_duration: headDuration,
+    elapsed_ms: Date.now() - startWall
+  };
+}
+
+module.exports = { verifyScene, renderPreview, extractBoundaryClip, openScene, withBrowser, renderSettings, isGeneratedSceneDefect };

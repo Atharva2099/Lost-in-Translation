@@ -21,6 +21,9 @@
 
 /experiments/
 
+architecture.md
+
+
 # Never publish credentials, even if an allowlisted directory contains them.
 .env
 .env.*

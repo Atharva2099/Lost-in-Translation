@@ -49,8 +49,30 @@ function installScene(source, width, style, configuration = {}) {
     const dense = engine.densify(path, 60);
     return closed ? dense.slice(0, -1) : dense;
   }
+  const rawTiming = configuration.timing || {};
+  const timingCues = rawTiming.cues || {};
+  const timingWords = Array.isArray(rawTiming.words) ? rawTiming.words : [];
+  const timing = Object.freeze({
+    measuredDuration: rawTiming.measured_duration ?? expectedDuration ?? 0,
+    speechStart: rawTiming.speech_start ?? 0,
+    speechEnd: rawTiming.speech_end ?? (expectedDuration || 0),
+    observationPause: rawTiming.observation_pause ?? 0,
+    cues: Object.freeze({ ...timingCues }),
+    words: timingWords,
+    cue(wordOrKey, fallback = 0) {
+      if (!wordOrKey) return fallback;
+      const key = String(wordOrKey).toLowerCase();
+      if (Number.isFinite(timingCues[wordOrKey])) return timingCues[wordOrKey];
+      if (Number.isFinite(timingCues[key])) return timingCues[key];
+      const match = timingWords.find((w) => String(w.word || "").toLowerCase().replace(/[^\w]/g, "") === key);
+      return match && Number.isFinite(match.start) ? match.start : fallback;
+    }
+  });
   const kit = Object.freeze({
     W, H, PAL, clamp: engine.clamp, lerp: engine.lerp, ease: engine.easeInOutCubic, rng: engine.rngFor,
+    entryAnchor: configuration.entryAnchor ? Object.freeze({ ...configuration.entryAnchor }) : null,
+    exitAnchor: configuration.exitAnchor ? Object.freeze({ ...configuration.exitAnchor }) : null,
+    timing,
     riso: press ? Object.freeze({ plate, tone: window.Riso.tone, knockout: (fn) => press.knockout(fn), ramp: window.Riso.ramp, radial: window.Riso.radial }) : null,
     stroke(points, options = {}) { engine.penStroke(press ? plate(ink(options.color)) : ctx, prepared(points, options.closed), { width: 5, color: PAL.ink, seed: "stroke", ...options, ...(press ? { color: "#000" } : {}) }); },
     circle(x, y, r, options = {}) {
