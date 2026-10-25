@@ -95,6 +95,11 @@ function installScene(source, width, style, configuration = {}) {
     const result = scene.draw(ctx, press ? Math.floor(t * 12) / 12 : t, kit);
     if (result && typeof result.then === "function") throw new Error("draw must be synchronous.");
     if (press) press.print(ctx, { key: Math.floor(t * 12) / 12 });
+
+    // Optional burned-in subtitles on presentation canvas (excluded from non-subtitle prose density counting)
+    if (configuration.subtitles && configuration.subtitles.length) {
+      engine.drawBurnedSubtitles(ctx, t, configuration.subtitles, { width: W, height: H, safeBottom: safe.bottom });
+    }
     const warnings = [];
     for (const item of texts) {
       const [x0, y0, x1, y1] = item.box;

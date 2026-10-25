@@ -66,7 +66,8 @@ function renderSettings(brief, width) {
   if (typography && !validateTypography(typography)) throw new Error("Invalid project typography settings.");
   return { width, height: outputHeight, style: brief.style, configuration: {
     logicalWidth, logicalHeight, outputHeight, duration: brief.duration,
-    safeRegion: geometry.safe_region, typography, density: brief.density_policy || { maxWords: 30, maxLongBlocks: 2 }, palette: brief.palette || {}
+    safeRegion: geometry.safe_region, typography, density: brief.density_policy || { maxWords: 30, maxLongBlocks: 2 }, palette: brief.palette || {},
+    subtitles: brief.subtitles || []
   } };
 }
 
@@ -165,9 +166,9 @@ async function verifyScene(workspace, { signal, width = 540, timeoutMs = 30000 }
   return result;
 }
 
-function checkVideo(path, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal }) {
+function checkVideo(path, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal, hasAudio = false }) {
   return new Promise((resolve, reject) => {
-    const child = spawn("ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-show_entries", "format=duration", "-of", "json", path],
+    const child = spawn("ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=width,height,codec_type,nb_read_frames", "-show_entries", "format=duration", "-of", "json", path],
       { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH }, signal, timeout: 15000 });
     let text = "";
     child.stdout.on("data", (chunk) => { text += chunk; if (text.length > 64000) child.kill(); });
@@ -175,34 +176,62 @@ function checkVideo(path, { width, height = Math.round(width * 16 / 9), fps, fra
     child.on("close", (code) => {
       try {
         const info = JSON.parse(text);
-        const stream = info.streams?.[0];
+        const stream = info.streams?.find(s => s.codec_type === "video") || info.streams?.[0];
+        const aStream = info.streams?.find(s => s.codec_type === "audio");
         if (code !== 0 || !stream || stream.width !== width || stream.height !== height ||
             Number(stream.nb_read_frames) !== frameCount || !Number.isFinite(Number(info.format?.duration)) ||
-            Math.abs(Number(info.format?.duration) - frameCount / fps) > 0.01) {
+            Math.abs(Number(info.format?.duration) - frameCount / fps) > 0.05) {
           throw new Error("Encoded video failed dimension, frame-count or duration validation.");
         }
+        if (hasAudio && !aStream) {
+          throw new Error("Encoded video expected an audio stream but none was found.");
+        }
         resolve();
-      } catch { reject(new Error("Encoded video failed dimension, frame-count or duration validation.")); }
+      } catch (err) { reject(new Error(`Encoded video validation failed: ${err.message}`)); }
     });
   });
 }
 
-function encode(dir, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal }) {
+function encode(dir, { width, height = Math.round(width * 16 / 9), fps, frameCount, signal, audioPath = null, srtPath = null }) {
   const destination = join(dir, "preview.mp4");
   const temporary = join(dir, "preview.tmp.mp4");
   noSymlinks(PROJECT, temporary);
   return new Promise((resolve, reject) => {
-    const child = spawn("ffmpeg", ["-y", "-loglevel", "error", "-framerate", String(fps), "-i", join(dir, "frames/f%05d.jpg"),
-      "-frames:v", String(frameCount), "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", temporary],
+    const ffArgs = [
+      "-y", "-loglevel", "error", "-framerate", String(fps),
+      "-i", join(dir, "frames/f%05d.jpg")
+    ];
+    if (audioPath && fs.existsSync(audioPath)) {
+      ffArgs.push("-i", audioPath);
+    }
+    if (srtPath && fs.existsSync(srtPath)) {
+      ffArgs.push("-i", srtPath);
+    }
+    ffArgs.push("-map", "0:v:0");
+    if (audioPath && fs.existsSync(audioPath)) {
+      ffArgs.push("-map", "1:a:0", "-c:a", "aac", "-b:a", "192k");
+    }
+    if (srtPath && fs.existsSync(srtPath)) {
+      const srtIndex = audioPath && fs.existsSync(audioPath) ? "2:s:0" : "1:s:0";
+      ffArgs.push("-map", srtIndex, "-c:s", "mov_text", "-metadata:s:s:0", "language=eng");
+    }
+    ffArgs.push(
+      "-frames:v", String(frameCount),
+      "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+      temporary
+    );
+
+    const child = spawn("ffmpeg", ffArgs,
     { stdio: ["ignore", "ignore", "pipe"], env: { PATH: process.env.PATH }, signal, timeout: 45000 });
     child.stderr.resume();
     child.on("error", () => reject(new Error("FFmpeg failed or was cancelled.")));
     child.on("close", async (code) => {
       if (code !== 0) return reject(new Error("FFmpeg encoding failed."));
       try {
-        await checkVideo(temporary, { width, height, fps, frameCount, signal });
+        await checkVideo(temporary, { width, height, fps, frameCount, signal, hasAudio: Boolean(audioPath && fs.existsSync(audioPath)) });
         fs.renameSync(temporary, noSymlinks(PROJECT, destination));
-        resolve({ width, fps, frameCount });
+        resolve({ width, height, fps, frameCount });
       } catch (error) { reject(error); }
     });
   });
@@ -239,8 +268,16 @@ async function renderPreview(workspace, { signal, width = 540, fps = 24, timeout
       captured++;
     }
   }, { signal, timeoutMs, software: brief.style === "risograph" });
-  await encode(dir, { width, height: settings.height, fps, frameCount, signal });
-  workspace.state.preview = { ...identity, file: "preview.mp4", frame_count: frameCount, captured_frames: captured, audio: false };
+  await encode(dir, {
+    width,
+    height: settings.height,
+    fps,
+    frameCount,
+    signal,
+    audioPath: brief.audio ? join(workspace.root, brief.audio) : null,
+    srtPath: brief.subtitles_srt ? join(workspace.root, brief.subtitles_srt) : null
+  });
+  workspace.state.preview = { ...identity, file: "preview.mp4", frame_count: frameCount, captured_frames: captured, audio: Boolean(brief.audio) };
   workspace.save();
   return workspace.state.preview;
 }

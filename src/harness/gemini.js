@@ -1,7 +1,7 @@
 const { readFileSync } = require("node:fs");
 const { parseEnv } = require("node:util");
 
-const MODELS = Object.freeze({ lead: "gemini-4-argon", reviewer: "gemini-3.8-flash" });
+const MODELS = Object.freeze({ lead: "gemini-4-argon", reviewer: "gemini-3.8-flash", tts: "gemini-3.8-flash-lite-tts", ttsStudio: "gemini-3.8-flash-tts" });
 const KEY_NAMES = ["GEMINI_API_KEY", "Gemini_API_KEY", "GOOGLE_API_KEY"];
 
 function credentials(env = process.env, envPath = ".env") {

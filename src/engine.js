@@ -1239,6 +1239,45 @@
     lerpColor,
     drawTopHUD,
     drawSubtitles,
-    drawBrushWipe
+    drawBrushWipe,
+    drawBurnedSubtitles(ctx, t, cues, { width = 1080, height = 1920, safeBottom = null } = {}) {
+      if (!cues || !cues.length) return;
+      const active = cues.find(c => t >= c.start - 0.05 && t <= c.end + 0.08);
+      if (!active) return;
+
+      const words = active.words || [];
+      ctx.save();
+      ctx.font = "700 32px 'Trebuchet MS', 'Arial', sans-serif";
+      ctx.textBaseline = "middle";
+
+      const spaceW = ctx.measureText(" ").width;
+      const wordWidths = words.map(w => ctx.measureText(w.word).width);
+      const totalW = wordWidths.reduce((a, b) => a + b, 0) + Math.max(0, words.length - 1) * spaceW;
+
+      const padX = 28;
+      const boxW = Math.min(width - 64, Math.max(280, totalW + padX * 2));
+      const boxH = 58;
+      const boxX = (width - boxW) / 2;
+      const maxBottom = Number.isFinite(safeBottom) ? safeBottom : height - 48;
+      const boxY = maxBottom - boxH - 12;
+
+      // Soft pill backdrop
+      ctx.fillStyle = "rgba(27, 23, 30, 0.88)";
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(boxX, boxY, boxW, boxH, 16) : ctx.rect(boxX, boxY, boxW, boxH);
+      ctx.fill();
+
+      let curX = (width - Math.min(totalW, boxW - padX * 2)) / 2;
+      const centerY = boxY + boxH / 2;
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        const isSpoken = t >= w.start && t <= w.end;
+        ctx.fillStyle = isSpoken ? "#E8A838" : "#FFFFFF";
+        ctx.textAlign = "left";
+        ctx.fillText(w.word, curX, centerY);
+        curX += wordWidths[i] + spaceW;
+      }
+      ctx.restore();
+    }
   };
 })();
